@@ -171,7 +171,7 @@ $BtnDelay1.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(("Atualização agendada para {0:dd/MM/yyyy HH:mm}." -f $runAt),"Agendado",'OK','Information') | Out-Null
   } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
@@ -181,7 +181,7 @@ $BtnDelay2.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(("Atualização agendada para {0:dd/MM/yyyy HH:mm}." -f $runAt),"Agendado",'OK','Information') | Out-Null
   } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
