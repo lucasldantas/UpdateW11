@@ -8,9 +8,9 @@ param([switch]$RePrompt)
 #   - Reaberta com -RePrompt => NÃO permite adiar de novo (só Executar)
 #   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 e relança
 #   - Tarefa: schtasks.exe /RU (usuário atual) + /IT (sem pedir senha; exige sessão)
+#   - Salva sempre como UTF-8 BOM (garante acentos corretos no PowerShell 5.1)
 # --------------------------------------------------------------------
 
-# (ajuda com consoles que não estão em UTF-8; o XAML já está em Unicode)
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
 # ==================== CONFIG GERAL ====================
@@ -26,7 +26,7 @@ $CommandToRun = { & msg * 'Teste' }   # <-- troque depois pelo comando real
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
 $RepoRef      = 'main'                # branch
-$RepoFilePath = 'ui.ps1'              # caminho do arquivo no repo (case-sensitive)
+$RepoFilePath = 'ui.ps1'              # caminho do arquivo no repo
 # =====================================================
 
 # ========== Download robusto do GitHub ==========
@@ -76,14 +76,16 @@ try {
 if (-not $RunningFromTarget) {
   try {
     $bytes = Get-UiFromGitHub -Owner $RepoOwner -Repo $RepoName -Path $RepoFilePath -Ref $RepoRef
-    [IO.File]::WriteAllBytes($TargetPath, $bytes)
+    $text  = [Text.Encoding]::UTF8.GetString($bytes)
+    $utf8BOM = New-Object System.Text.UTF8Encoding($true)   # UTF-8 com BOM
+    [IO.File]::WriteAllText($TargetPath, $text, $utf8BOM)
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("Falha ao preparar a UI:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
     return
   }
 
-  # Reabra a partir do arquivo salvo (força -STA para WPF)
+  # Reabra a partir do arquivo salvo
   $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
@@ -118,7 +120,6 @@ function New-RePromptTask {
   if (-not (Test-Path -LiteralPath $PsExeFull)) { throw "powershell.exe não encontrado em '$PsExeFull'." }
   if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Script não encontrado em '$ScriptPath'." }
 
-  # Usuário atual (DOMAIN\user, AzureAD\user, MACHINE\user etc.)
   $ru = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
   if ([string]::IsNullOrWhiteSpace($ru)) { throw "Não foi possível resolver o usuário atual para /RU." }
 
@@ -126,12 +127,10 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
-  # /TR: um único valor com aspas corretas
   $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
-  # /RU + /IT: agenda no usuário atual e não pede senha; exige sessão para exibir UI
   $args = @(
     '/Create',
     '/TN', $TaskName,
@@ -254,4 +253,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
