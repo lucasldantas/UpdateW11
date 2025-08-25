@@ -1,5 +1,4 @@
-﻿#requires -version 5.1
-chcp 65001
+#requires -version 5.1
 param([switch]$RePrompt)
 
 # --------------------------------------------------------------------
