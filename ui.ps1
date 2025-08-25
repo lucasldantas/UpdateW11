@@ -1,60 +1,88 @@
 #requires -version 5.1
 param([switch]$RePrompt)
 
-# ==================== CONFIG / PATHS ====================
+# ==================== CONFIG GERAL ====================
 $AppRoot      = 'C:\ProgramData\UpdateW11'
-$TargetPath   = Join-Path $AppRoot 'ui.ps1'         # caminho final fixo deste script
+$TargetPath   = Join-Path $AppRoot 'ui.ps1'
 $TaskName     = 'GDL-AgendarScriptTeste'
-$PsExeFull    = Join-Path $PSHOME 'powershell.exe'  # caminho absoluto do powershell.exe
-# Comando real que você quer executar ao clicar "Executar agora":
-$CommandToRun = { & msg * 'Teste' }
-# ==================== GITHUB (auto-atualização) =========
+$PsExeFull    = Join-Path $PSHOME 'powershell.exe'
+$CommandToRun = { & msg * 'Teste' }     # <-- troque depois pelo comando real
+
+# Repo (ajuste se necessário)
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
-$RepoRef      = 'main'
-$RepoFilePath = 'ui.ps1'
-# =======================================================
+$RepoRef      = 'main'                  # branch
+$RepoFilePath = 'ui.ps1'                # caminho do arquivo dentro do repo (case-sensitive)
+# =====================================================
 
-# ---------- Fase 1: garantir que estamos rodando do arquivo físico ----------
-# Detecta se este código foi carregado via IEX (sem $PSCommandPath) ou fora do arquivo destino
-$SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
+# ========== Função robusta para baixar o ui.ps1 ==========
+function Get-UiFromGitHub {
+  param(
+    [string]$Owner, [string]$Repo, [string]$Path, [string]$Ref
+  )
+  $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
+  $rawUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref/$Path"
 
+  # Usa token $t se vier do bootstrap
+  $headers = @{ 'User-Agent'='ps'; 'Accept'='application/vnd.github+json' }
+  if ($script:t -and $t) { $headers['Authorization'] = "token $t" }
+
+  try {
+    $resp = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
+    if (-not $resp.content) { throw "Resposta sem 'content' em $apiUrl" }
+    return ,([Convert]::FromBase64String($resp.content))
+  } catch {
+    $e1 = $_.Exception.Message
+    # Fallback: tentar RAW (só funciona se o repo/arquivo for público)
+    try {
+      $rawHeaders = @{ 'User-Agent'='ps' }
+      if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }  # alguns proxies aceitam
+      $bytes = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
+      return ,($bytes.Content | [Text.Encoding]::UTF8.GetBytes())
+    } catch {
+      $e2 = $_.Exception.Message
+      throw "Falha ao baixar UI.
+Tentativas:
+  1) API: $apiUrl
+     Erro: $e1
+  2) RAW: $rawUrl
+     Erro: $e2"
+    }
+  }
+}
+
+# ==================== Bootstrap local ====================
 if (-not (Test-Path -LiteralPath $AppRoot)) {
   New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
 }
 
-# Se não estamos rodando a partir do arquivo destino (ou não temos caminho),
-# baixar do GitHub e relançar como arquivo.
-if ([string]::IsNullOrWhiteSpace($SelfPath) -or
-    ((Resolve-Path $SelfPath -ErrorAction SilentlyContinue).Path -ne (Resolve-Path $TargetPath -ErrorAction SilentlyContinue))) {
+# Detecta se estamos rodando "colado" (IEX) ou de arquivo
+$SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
+$RunningFromTarget = $false
+try {
+  $RunningFromTarget = (Resolve-Path $SelfPath -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $TargetPath -ErrorAction SilentlyContinue).Path
+} catch {}
 
-  # Monta URL da API do GitHub
-  $apiUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/contents/$RepoFilePath?ref=$RepoRef"
-
-  # Cabeçalhos: usa o token $t se ele existir no escopo (o seu one-liner fornece)
-  $headers = @{ 'User-Agent' = 'ps' }
-  if ($script:t -and $t) { $headers['Authorization'] = "token $t" }
-
+if (-not $RunningFromTarget) {
   try {
-    $resp   = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
-    $bytes  = [Convert]::FromBase64String($resp.content)
+    $bytes = Get-UiFromGitHub -Owner $RepoOwner -Repo $RepoName -Path $RepoFilePath -Ref $RepoRef
     [IO.File]::WriteAllBytes($TargetPath, $bytes)
   } catch {
     [System.Windows.MessageBox]::Show("Falha ao preparar a UI:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
     return
   }
 
-  # Relança a partir do arquivo salvo (mantém -RePrompt se vier marcado)
+  # Relança do arquivo salvo (preserva -RePrompt)
   $args = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
   return
 }
 
-# Daqui pra baixo, já estamos executando de C:\ProgramData\UpdateW11\ui.ps1
+# Agora estamos em C:\ProgramData\UpdateW11\ui.ps1
 $ScriptPath = (Resolve-Path -LiteralPath $TargetPath).Path
 
-# ---------- Helpers ----------
+# ==================== Helpers ====================
 function Test-IsAdmin {
   $id=[Security.Principal.WindowsIdentity]::GetCurrent()
   (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -62,21 +90,16 @@ function Test-IsAdmin {
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
-    if ($svc.Status -ne 'Running') {
-      Start-Service -Name 'Schedule' -ErrorAction Stop
-      $svc.WaitForStatus('Running','00:00:05') | Out-Null
-    }
+    if ($svc.Status -ne 'Running') { Start-Service -Name 'Schedule' -ErrorAction Stop; $svc.WaitForStatus('Running','00:00:05') | Out-Null }
   } catch {}
 }
 function Remove-RePromptTask {
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 }
 
-# Cria tarefa ONCE que reabre a UI com -RePrompt (sem re-adiar)
 function New-RePromptTask {
   param([datetime]$when)
   Ensure-SchedulerRunning
-
   if (-not (Test-Path -LiteralPath $PsExeFull)) { throw "powershell.exe não encontrado em '$PsExeFull'." }
   if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Script não encontrado em '$ScriptPath'." }
 
@@ -84,23 +107,11 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
-  # /TR deve ser 1 único token com aspas corretas:
   $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 
-  $args = @(
-    '/Create',
-    '/TN', $TaskName,
-    '/TR', $trValue,
-    '/SC', 'ONCE',
-    '/SD', $sd,
-    '/ST', $st,
-    '/F',
-    '/RL', $runLevel,
-    '/IT'          # precisa de usuário logado no disparo para mostrar a UI
-  )
-
+  $args = @('/Create','/TN',$TaskName,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/F','/RL',$runLevel,'/IT')
   $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) { throw "Falha ao criar a tarefa. Saída do schtasks:`n$output" }
 }
@@ -112,7 +123,7 @@ function Run-Now {
   }
 }
 
-# ---------- UI (WPF) ----------
+# ==================== UI (WPF) ====================
 Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
 [xml]$xaml = @"
@@ -163,7 +174,7 @@ if ($RePrompt) {
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
-# ---------- Eventos ----------
+# Eventos
 $BtnNow.Add_Click({ $window.Close(); Run-Now })
 
 $BtnDelay1.Add_Click({
@@ -171,7 +182,7 @@ $BtnDelay1.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Atualização agendada para {0:dd/MM/yyyy HH:mm}." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
   } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
@@ -181,7 +192,7 @@ $BtnDelay2.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Atualização agendada para {0:dd/MM/yyyy HH:mm}." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
   } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
