@@ -13,9 +13,8 @@ param(
 # ============ CONFIG ============
 $TaskName        = "GDL-AgendarScriptTeste"
 $PsExeFull       = Join-Path $PSHOME 'powershell.exe'   # caminho absoluto do PowerShell
-$ScriptPath      = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
-$BaseArgs        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -RePrompt"
-$CommandToRun    = { & msg * 'Teste' }  # <-- Troque pelo comando real quando quiser
+$ScriptPath      = "C:\Scripts\Agendar-Script.ps1"      # <-- AJUSTE para onde você salvar este script
+$CommandToRun    = { & msg * 'Teste' }                  # <-- Troque pelo comando real quando quiser
 # =================================
 
 # ---------- Helpers ----------
@@ -45,21 +44,20 @@ function New-RePromptTask {
     throw "powershell.exe não encontrado em '$PsExeFull'."
   }
   if (-not (Test-Path -LiteralPath $ScriptPath)) {
-    throw "Script não encontrado em '$ScriptPath'."
+    throw "Script não encontrado em '$ScriptPath'. Salve este arquivo nesse caminho ou ajuste `$ScriptPath."
   }
 
   $runLevel = if (Test-IsAdmin) { 'HIGHEST' } else { 'NORMAL' }
   $sd = $when.ToString('dd/MM/yyyy')  # pt-BR
   $st = $when.ToString('HH:mm')       # 24h
 
-  # Valor do /TR precisa ser um ÚNICO elemento (string) com o caminho do exe entre aspas
-  # e o restante dos argumentos logo em seguida.
-  $trValue = "`"$PsExeFull`" $BaseArgs"
+  # /TR precisa ser um ÚNICO valor (string) com EXE entre aspas + argumentos
+  $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
-  # Remover a tarefa anterior, se existir (silencioso)
+  # Remove tarefa anterior se existir (silencioso)
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 
-  # Monta os parâmetros em ARRAY (cada par /PAR VALOR é um item independente)
+  # Monta os parâmetros em ARRAY; cada item é um token seguro
   $args = @(
     '/Create',
     '/TN', $TaskName,
@@ -69,13 +67,12 @@ function New-RePromptTask {
     '/ST', $st,
     '/F',
     '/RL', $runLevel,
-    '/IT'          # interativo: exige usuário logado no disparo
+    '/IT'          # interativo: exige usuário logado no disparo para mostrar a UI
   )
 
-  # Execução direta com & (sem Start-Process), preservando as aspas do /TR
-  $proc = & schtasks.exe @args 2>&1
+  $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) {
-    throw "Falha ao criar a tarefa. Saída do schtasks:`n$proc"
+    throw "Falha ao criar a tarefa. Saída do schtasks:`n$output"
   }
 }
 
@@ -173,17 +170,25 @@ $BtnNow.Add_Click({
 
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled = $false; $BtnDelay2.IsEnabled = $false; $BtnNow.IsEnabled = $false
-  $runAt = (Get-Date).AddHours(1)
-  New-RePromptTask -when $runAt
-  [System.Windows.MessageBox]::Show("Agendado para $($runAt.ToString('dd/MM/yyyy HH:mm')). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
+  try {
+    $runAt = (Get-Date).AddHours(1)
+    New-RePromptTask -when $runAt
+    [System.Windows.MessageBox]::Show("Agendado para $($runAt:dd/MM/yyyy HH:mm). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
+  } catch {
+    [System.Windows.MessageBox]::Show("Falha ao agendar: `n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
+  }
   $window.Close()
 })
 
 $BtnDelay2.Add_Click({
   $BtnDelay1.IsEnabled = $false; $BtnDelay2.IsEnabled = $false; $BtnNow.IsEnabled = $false
-  $runAt = (Get-Date).AddHours(2)
-  New-RePromptTask -when $runAt
-  [System.Windows.MessageBox]::Show("Agendado para $($runAt.ToString('dd/MM/yyyy HH:mm')). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
+  try {
+    $runAt = (Get-Date).AddHours(2)
+    New-RePromptTask -when $runAt
+    [System.Windows.MessageBox]::Show("Agendado para $($runAt:dd/MM/yyyy HH:mm). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
+  } catch {
+    [System.Windows.MessageBox]::Show("Falha ao agendar: `n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
+  }
   $window.Close()
 })
 
