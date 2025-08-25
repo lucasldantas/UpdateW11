@@ -121,6 +121,7 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
         <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
         <TextBlock Text='Realizar o update do Windows 10 para o Windows 11' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
         <TextBlock Text='Tempo Estimado: 20 a 30 minutos' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
+        <TextBlock Text='' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
       </StackPanel>
     </Border>
 
