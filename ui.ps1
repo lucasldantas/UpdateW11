@@ -160,7 +160,9 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Agendar Execução" Height="300" Width="520" WindowStartupLocation="CenterScreen"
+        Title="Agendar Execução" Width="520"
+        MinHeight="300" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize" Background="#0f172a">
   <Grid Margin="16">
     <Grid.RowDefinitions>
@@ -257,4 +259,5 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
