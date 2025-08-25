@@ -1,64 +1,78 @@
 #requires -version 5.1
-<#
-  Agendamento/execução com UI moderna (WPF)
-  - Executar agora -> roda "msg * Teste"
-  - Adiar 1h / 2h -> agenda reabertura desta UI para confirmação
-  - Na reabertura (-RePrompt) não permite adiar novamente
-  - Padroniza tudo em C:\ProgramData\UpdateW11\Agendar-Script.ps1
-#>
-
 param([switch]$RePrompt)
 
-# ==================== PADRÕES ====================
-$AppRoot     = 'C:\ProgramData\UpdateW11'
-$TargetPath  = Join-Path $AppRoot 'Agendar-Script.ps1'
-$PsExeFull   = Join-Path $PSHOME 'powershell.exe'
-$TaskName    = 'GDL-AgendarScriptTeste'
-$CommandToRun= { & msg * 'Teste' }    # <-- troque aqui pelo comando real
-# =================================================
+# ==================== CONFIG / PATHS ====================
+$AppRoot      = 'C:\ProgramData\UpdateW11'
+$TargetPath   = Join-Path $AppRoot 'ui.ps1'         # caminho final fixo deste script
+$TaskName     = 'GDL-AgendarScriptTeste'
+$PsExeFull    = Join-Path $PSHOME 'powershell.exe'  # caminho absoluto do powershell.exe
+# Comando real que você quer executar ao clicar "Executar agora":
+$CommandToRun = { & msg * 'Teste' }
+# ==================== GITHUB (auto-atualização) =========
+$RepoOwner    = 'lucasldantas'
+$RepoName     = 'UpdateW11'
+$RepoRef      = 'main'
+$RepoFilePath = 'ui.ps1'
+# =======================================================
 
-# --------- Descobrir caminho atual e se realocar ---------
+# ---------- Fase 1: garantir que estamos rodando do arquivo físico ----------
+# Detecta se este código foi carregado via IEX (sem $PSCommandPath) ou fora do arquivo destino
 $SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
 
 if (-not (Test-Path -LiteralPath $AppRoot)) {
   New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
 }
 
-if ([string]::IsNullOrWhiteSpace($SelfPath)) {
-  [System.Windows.MessageBox]::Show("Salve este código como .ps1 e execute novamente.","Caminho indefinido",'OK','Error') | Out-Null
-  return
-}
+# Se não estamos rodando a partir do arquivo destino (ou não temos caminho),
+# baixar do GitHub e relançar como arquivo.
+if ([string]::IsNullOrWhiteSpace($SelfPath) -or
+    ((Resolve-Path $SelfPath -ErrorAction SilentlyContinue).Path -ne (Resolve-Path $TargetPath -ErrorAction SilentlyContinue))) {
 
-# Se não está rodando do local padrão, copie e relance de lá (preserva -RePrompt se houver)
-if ((Resolve-Path $SelfPath).Path -ne (Resolve-Path $TargetPath -ErrorAction SilentlyContinue)) {
-  Copy-Item -LiteralPath $SelfPath -Destination $TargetPath -Force
-  $args = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File', $TargetPath)
+  # Monta URL da API do GitHub
+  $apiUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/contents/$RepoFilePath?ref=$RepoRef"
+
+  # Cabeçalhos: usa o token $t se ele existir no escopo (o seu one-liner fornece)
+  $headers = @{ 'User-Agent' = 'ps' }
+  if ($script:t -and $t) { $headers['Authorization'] = "token $t" }
+
+  try {
+    $resp   = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
+    $bytes  = [Convert]::FromBase64String($resp.content)
+    [IO.File]::WriteAllBytes($TargetPath, $bytes)
+  } catch {
+    [System.Windows.MessageBox]::Show("Falha ao preparar a UI:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+    return
+  }
+
+  # Relança a partir do arquivo salvo (mantém -RePrompt se vier marcado)
+  $args = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
   return
 }
 
-# A partir daqui, já estamos rodando de C:\ProgramData\UpdateW11\Agendar-Script.ps1
+# Daqui pra baixo, já estamos executando de C:\ProgramData\UpdateW11\ui.ps1
 $ScriptPath = (Resolve-Path -LiteralPath $TargetPath).Path
 
-# ---------------- Helpers ----------------
+# ---------- Helpers ----------
 function Test-IsAdmin {
   $id=[Security.Principal.WindowsIdentity]::GetCurrent()
   (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
-    if ($svc.Status -ne 'Running') { Start-Service -Name 'Schedule' -ErrorAction Stop; $svc.WaitForStatus('Running','00:00:05') | Out-Null }
+    if ($svc.Status -ne 'Running') {
+      Start-Service -Name 'Schedule' -ErrorAction Stop
+      $svc.WaitForStatus('Running','00:00:05') | Out-Null
+    }
   } catch {}
 }
-
 function Remove-RePromptTask {
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 }
 
-# Cria tarefa sem travar a UI; /TR é 1 único valor com aspas corretas
+# Cria tarefa ONCE que reabre a UI com -RePrompt (sem re-adiar)
 function New-RePromptTask {
   param([datetime]$when)
   Ensure-SchedulerRunning
@@ -70,6 +84,7 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
+  # /TR deve ser 1 único token com aspas corretas:
   $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
@@ -83,7 +98,7 @@ function New-RePromptTask {
     '/ST', $st,
     '/F',
     '/RL', $runLevel,
-    '/IT'   # precisa de sessão de usuário no disparo para mostrar UI
+    '/IT'          # precisa de usuário logado no disparo para mostrar a UI
   )
 
   $output = & schtasks.exe @args 2>&1
@@ -97,7 +112,7 @@ function Run-Now {
   }
 }
 
-# ---------------- UI (WPF) ----------------
+# ---------- UI (WPF) ----------
 Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
 [xml]$xaml = @"
@@ -112,14 +127,12 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-
     <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
       <StackPanel>
         <TextBlock Name="TitleText" Text="Atualização Obrigatória" Foreground="#e5e7eb" FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
         <TextBlock Name="SubText" Text="Você pode executar agora ou adiar por até 2 horas." Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
       </StackPanel>
     </Border>
-
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <StackPanel>
         <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
@@ -127,7 +140,6 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
         <TextBlock Text='Tempo Estimado: 20 a 30 minutos' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
       </StackPanel>
     </Border>
-
     <DockPanel Grid.Row="3">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
         <Button Name="BtnNow" Content="Executar agora" Margin="8,0,0,0" Padding="16,8" Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold" BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
@@ -141,12 +153,8 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-
-$BtnNow    = $window.FindName('BtnNow')
-$BtnDelay1 = $window.FindName('BtnDelay1')
-$BtnDelay2 = $window.FindName('BtnDelay2')
-$TitleTxt  = $window.FindName('TitleText')
-$SubTxt    = $window.FindName('SubText')
+$BtnNow=$window.FindName('BtnNow'); $BtnDelay1=$window.FindName('BtnDelay1'); $BtnDelay2=$window.FindName('BtnDelay2')
+$TitleTxt=$window.FindName('TitleText'); $SubTxt=$window.FindName('SubText')
 
 if ($RePrompt) {
   $TitleTxt.Text = "Confirmação de execução"
@@ -155,11 +163,8 @@ if ($RePrompt) {
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
-# --------- Eventos ---------
-$BtnNow.Add_Click({
-  $window.Close()
-  Run-Now
-})
+# ---------- Eventos ----------
+$BtnNow.Add_Click({ $window.Close(); Run-Now })
 
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
@@ -167,9 +172,7 @@ $BtnDelay1.Add_Click({
     $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
-  } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
-  }
+  } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
 
@@ -179,9 +182,7 @@ $BtnDelay2.Add_Click({
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
-  } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
-  }
+  } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
   $window.Close()
 })
 
