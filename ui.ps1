@@ -43,7 +43,7 @@ $LogPath         = Join-Path $AppRoot 'ui.log'
 $DefaultWorkerBody = @'
 # worker.ps1 (executa como SYSTEM)
 # Troque o comando abaixo pelo real:
-msg * "Executando tarefa elevada (SYSTEM) — exemplo"
+msg * "TESTE"
 '@
 
 # Repo (quando executando via IEX/GitHub)
@@ -357,3 +357,4 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
