@@ -33,22 +33,20 @@ function Get-UiFromGitHub {
     return ,([Convert]::FromBase64String($resp.content))
   } catch {
     $e1 = $_.Exception.Message
-    # Fallback: tentar RAW (só funciona se o repo/arquivo for público)
-    try {
-      $rawHeaders = @{ 'User-Agent'='ps' }
-      if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }  # alguns proxies aceitam
-      $bytes = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
-      return ,($bytes.Content | [Text.Encoding]::UTF8.GetBytes())
-    } catch {
-      $e2 = $_.Exception.Message
-      throw "Falha ao baixar UI.
+# Fallback: tentar RAW (só funciona se o repo/arquivo for público)
+try {
+  $rawHeaders = @{ 'User-Agent'='ps' }
+  if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }
+  $resp = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
+  return ,([Text.Encoding]::UTF8.GetBytes($resp.Content))
+} catch {
+  $e2 = $_.Exception.Message
+  throw "Falha ao baixar UI.
 Tentativas:
   1) API: $apiUrl
      Erro: $e1
   2) RAW: $rawUrl
      Erro: $e2"
-    }
-  }
 }
 
 # ==================== Bootstrap local ====================
