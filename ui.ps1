@@ -12,8 +12,7 @@ param(
 
 # ============ CONFIG ============
 $TaskName        = "GDL-AgendarScriptTeste"
-$PsExeFull       = Join-Path $PSHOME 'powershell.exe'   # caminho absoluto e confiável
-# ScriptPath: funciona mesmo se rodar via . ou ISE
+$PsExeFull       = Join-Path $PSHOME 'powershell.exe'   # caminho absoluto do PowerShell
 $ScriptPath      = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $BaseArgs        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -RePrompt"
 $CommandToRun    = { & msg * 'Teste' }  # <-- Troque pelo comando real quando quiser
@@ -36,45 +35,52 @@ function Ensure-SchedulerRunning {
   } catch {}
 }
 
-# --------- Agendamento seguro (não trava a UI) ----------
+# --------- Agendamento robusto ----------
 function New-RePromptTask {
   param([datetime]$when)
 
   Ensure-SchedulerRunning
 
+  if (-not (Test-Path -LiteralPath $PsExeFull)) {
+    throw "powershell.exe não encontrado em '$PsExeFull'."
+  }
+  if (-not (Test-Path -LiteralPath $ScriptPath)) {
+    throw "Script não encontrado em '$ScriptPath'."
+  }
+
   $runLevel = if (Test-IsAdmin) { 'HIGHEST' } else { 'NORMAL' }
   $sd = $when.ToString('dd/MM/yyyy')  # pt-BR
   $st = $when.ToString('HH:mm')       # 24h
 
-  # /TR precisa ser UMA string. Aqui:
-  #  - toda a linha do comando vai entre aspas externas
-  #  - o caminho do exe e do script vão entre aspas internas escapadas
-  $tr = "`"$PsExeFull`" $BaseArgs"
+  # Valor do /TR precisa ser um ÚNICO elemento (string) com o caminho do exe entre aspas
+  # e o restante dos argumentos logo em seguida.
+  $trValue = "`"$PsExeFull`" $BaseArgs"
 
-  $argLine = @"
- /Create /TN "$TaskName" /TR "$tr" /SC ONCE /SD $sd /ST $st /F /RL $runLevel /IT
-"@.Trim()
+  # Remover a tarefa anterior, se existir (silencioso)
+  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 
-  # Rodar em job para não travar a UI
-  $job = Start-Job -ScriptBlock {
-    param($line)
-    try {
-      # remove tarefa anterior se existir
-      try { schtasks.exe /Delete /TN "$using:TaskName" /F | Out-Null } catch {}
-      Start-Process -FilePath 'schtasks.exe' -ArgumentList $line -NoNewWindow -Wait
-      0
-    } catch {
-      $_.Exception.Message
-      1
-    }
-  } -ArgumentList $argLine
+  # Monta os parâmetros em ARRAY (cada par /PAR VALOR é um item independente)
+  $args = @(
+    '/Create',
+    '/TN', $TaskName,
+    '/TR', $trValue,
+    '/SC', 'ONCE',
+    '/SD', $sd,
+    '/ST', $st,
+    '/F',
+    '/RL', $runLevel,
+    '/IT'          # interativo: exige usuário logado no disparo
+  )
 
-  Receive-Job -Job $job -Wait | Out-Null
-  Remove-Job $job -Force | Out-Null
+  # Execução direta com & (sem Start-Process), preservando as aspas do /TR
+  $proc = & schtasks.exe @args 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Falha ao criar a tarefa. Saída do schtasks:`n$proc"
+  }
 }
 
 function Remove-RePromptTask {
-  try { schtasks.exe /Delete /TN "$TaskName" /F | Out-Null } catch {}
+  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 }
 
 # --------- Execução do comando ----------
