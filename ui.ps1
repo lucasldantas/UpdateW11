@@ -163,7 +163,9 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
         Title="Agendar Execução" Width="520"
         MinHeight="300" SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize" Background="#0f172a">
+        ResizeMode="NoResize" Background="#0f172a"
+        WindowStyle="None" 
+        ShowInTaskbar="True">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -257,6 +259,7 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
 
 
