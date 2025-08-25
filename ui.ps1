@@ -33,8 +33,8 @@ $Txt_ErrorNoRU            = 'Não foi possível resolver o usuário atual para /
 # ==================== CONFIG GERAL ====================
 $AppRoot         = 'C:\ProgramData\UpdateW11'
 $TargetPath      = Join-Path $AppRoot 'ui.ps1'
-$TaskNameUI      = 'GDL-AgendarScriptTeste'     # tarefa da UI (usuário)
-$WorkerTaskName  = 'GDL-AgendarScriptWorker'    # tarefa do worker (SYSTEM)
+$TaskNameUI      = 'UpdateW11-UI'              # tarefa da UI (usuário)
+$WorkerTaskName  = 'UpdateW11-Worker'          # tarefa do worker (SYSTEM)
 $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $PsExeFull       = Join-Path $PSHOME 'powershell.exe'
 $LogPath         = Join-Path $AppRoot 'ui.log'
@@ -133,7 +133,13 @@ function Test-IsAdmin {
   (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 function Ensure-SchedulerRunning {
-  try { $svc = Get-Service -Name 'Schedule' -ErrorAction Stop; if ($svc.Status -ne 'Running'){ Start-Service 'Schedule'; $svc.WaitForStatus('Running','00:00:05') | Out-Null } } catch {}
+  try {
+    $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
+    if ($svc.Status -ne 'Running') {
+      Start-Service 'Schedule' -ErrorAction Stop
+      $svc.WaitForStatus('Running','00:00:05') | Out-Null
+    }
+  } catch {}
 }
 function Remove-UiTask { try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {} }
 
@@ -268,16 +274,27 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 </Window>
 "@
 
-$reader = New-Object System.Xml.XmlNodeReader $xaml
-$window = [Windows.Markup.XamlReader]::Load($reader)
+# Carrega a janela
+$reader  = New-Object System.Xml.XmlNodeReader $xaml
+$window  = [Windows.Markup.XamlReader]::Load($reader)
+if (-not $window) { throw "Falha ao carregar a UI a partir do XAML." }
 
-# Garantir visibilidade e foco
+# Garantir visibilidade e foco (usar Add_Loaded em PS 5.1)
 $window.Topmost = $true
-$window.Loaded.Add({
+$window.Add_Loaded({
   try {
-    $null = $window.Activate()
-    $null = $window.BringIntoView()
-    [System.Windows.Threading.DispatcherTimer]::new([TimeSpan]::FromMilliseconds(150), 'Normal', { try { $null = $window.Activate() } catch {} }, $window.Dispatcher) | Out-Null
+    $this.Activate()      | Out-Null
+    $this.BringIntoView() | Out-Null
+
+    # segunda tentativa após 150ms
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $timer.Add_Tick({
+      param($s,$e)
+      try { $this.Activate() | Out-Null } catch {}
+      $s.Stop()
+    })
+    $timer.Start()
   } catch {}
 })
 
@@ -315,7 +332,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    # use .AddMinutes(2) para teste rápido
+    # para teste rápido, troque para .AddMinutes(2)
     $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
