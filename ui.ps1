@@ -139,15 +139,20 @@ function Get-ActiveConsoleUser {
     $expl = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($expl -and $expl.UserName) { return $expl.UserName }
   } catch {}
+
   try {
     $out = (quser) 2>$null
     foreach ($line in $out) {
       if ($line -match '^\s*(\S+)\s+(\S+)\s+(\S+)') {
         $user=$Matches[1]; $state=$Matches[3]
-        if ($state -match 'Active|Ativa') { return ("{0}\{1}" -f ($env:USERDOMAIN ?? $env:COMPUTERNAME), $user) }
+        if ($state -match 'Active|Ativa') {
+          if ($env:USERDOMAIN) { return "$env:USERDOMAIN\$user" }
+          else { return "$env:COMPUTERNAME\$user" }
+        }
       }
     }
   } catch {}
+
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
@@ -333,4 +338,5 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
