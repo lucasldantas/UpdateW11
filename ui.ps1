@@ -186,11 +186,9 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <StackPanel>
         <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
-        
         <TextBlock Text="Realizar o update do Windows 10 para o Windows 11"
                    Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
                    Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
-        
         <TextBlock Text="Tempo Estimado: 20 a 30 minutos"
                    Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
                    Background="#0b1220" TextWrapping="Wrap"/>
@@ -259,5 +257,6 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
 
