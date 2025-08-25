@@ -12,8 +12,10 @@ param(
 
 # ============ CONFIG ============
 $TaskName        = "GDL-AgendarScriptTeste"
-$PsExe           = "powershell.exe"
-$PsArgsRePrompt  = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RePrompt"
+$PsExeFull       = Join-Path $PSHOME 'powershell.exe'   # caminho absoluto e confiável
+# ScriptPath: funciona mesmo se rodar via . ou ISE
+$ScriptPath      = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+$BaseArgs        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -RePrompt"
 $CommandToRun    = { & msg * 'Teste' }  # <-- Troque pelo comando real quando quiser
 # =================================
 
@@ -43,39 +45,36 @@ function New-RePromptTask {
   $runLevel = if (Test-IsAdmin) { 'HIGHEST' } else { 'NORMAL' }
   $sd = $when.ToString('dd/MM/yyyy')  # pt-BR
   $st = $when.ToString('HH:mm')       # 24h
-  $taskCmd = "$PsExe $PsArgsRePrompt"
 
-  # Cria em job para não bloquear a UI
+  # /TR precisa ser UMA string. Aqui:
+  #  - toda a linha do comando vai entre aspas externas
+  #  - o caminho do exe e do script vão entre aspas internas escapadas
+  $tr = "`"$PsExeFull`" $BaseArgs"
+
+  $argLine = @"
+ /Create /TN "$TaskName" /TR "$tr" /SC ONCE /SD $sd /ST $st /F /RL $runLevel /IT
+"@.Trim()
+
+  # Rodar em job para não travar a UI
   $job = Start-Job -ScriptBlock {
-    param($TaskName,$TaskCmd,$SD,$ST,$RunLevel)
+    param($line)
     try {
-      # Remove se já existir
-      try { schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
-      $args = @(
-        '/Create',
-        '/TN', $TaskName,
-        '/TR', $TaskCmd,
-        '/SC', 'ONCE',
-        '/SD', $SD,
-        '/ST', $ST,
-        '/F',
-        '/RL', $RunLevel,
-        '/IT'  # interativo: requer usuário logado no disparo
-      )
-      Start-Process -FilePath 'schtasks.exe' -ArgumentList $args -NoNewWindow -Wait
+      # remove tarefa anterior se existir
+      try { schtasks.exe /Delete /TN "$using:TaskName" /F | Out-Null } catch {}
+      Start-Process -FilePath 'schtasks.exe' -ArgumentList $line -NoNewWindow -Wait
       0
     } catch {
+      $_.Exception.Message
       1
     }
-  } -ArgumentList $TaskName,$taskCmd,$sd,$st,$runLevel
+  } -ArgumentList $argLine
 
-  # Espera terminar silenciosamente (sem travar a janela aberta)
   Receive-Job -Job $job -Wait | Out-Null
   Remove-Job $job -Force | Out-Null
 }
 
 function Remove-RePromptTask {
-  try { schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
+  try { schtasks.exe /Delete /TN "$TaskName" /F | Out-Null } catch {}
 }
 
 # --------- Execução do comando ----------
@@ -121,7 +120,6 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
         <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
         <TextBlock Text='Realizar o update do Windows 10 para o Windows 11' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
         <TextBlock Text='Tempo Estimado: 20 a 30 minutos' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
-        <TextBlock Text='' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
       </StackPanel>
     </Border>
 
