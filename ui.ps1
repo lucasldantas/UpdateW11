@@ -35,6 +35,7 @@ $AppRoot      = 'C:\ProgramData\UpdateW11'
 $TargetPath   = Join-Path $AppRoot 'ui.ps1'
 $TaskName     = 'GDL-AgendarScriptTeste'
 $PsExeFull    = Join-Path $PSHOME 'powershell.exe'
+$LogPath      = Join-Path $AppRoot 'ui.log'
 
 # Comando real ao clicar "Executar agora":
 $CommandToRun = { & msg * 'Teste' }   # <-- troque aqui pelo comando real
@@ -46,15 +47,24 @@ $RepoRef      = 'main'                # branch
 $RepoFilePath = 'ui.ps1'              # caminho do arquivo no repo
 # =====================================================
 
+# Pequeno helper de log (opcional)
+function Write-UiLog([string]$msg) {
+  try {
+    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Add-Content -LiteralPath $LogPath -Value "[$stamp] $msg"
+  } catch { }
+}
+
 # ========== GARANTIR STA (WPF PRECISA) ==========
 try {
   if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+    Write-UiLog "Relançando em STA. RePrompt=$RePrompt"
     $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
     if ($RePrompt) { $args += '-RePrompt' }
     Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
     return
   }
-} catch { }
+} catch { Write-UiLog "Falha ao checar STA: $($_.Exception.Message)" }
 
 # ========== Download robusto do GitHub ==========
 function Get-UiFromGitHub {
@@ -88,7 +98,6 @@ function Get-UiFromGitHub {
 if (-not (Test-Path -LiteralPath $AppRoot)) {
   New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
 }
-
 $SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
 $RunningFromTarget = $false
 try {
@@ -97,6 +106,7 @@ try {
 
 if (-not $RunningFromTarget) {
   try {
+    Write-UiLog "Baixando e gravando UI em UTF-8 BOM."
     $bytes = Get-UiFromGitHub -Owner $RepoOwner -Repo $RepoName -Path $RepoFilePath -Ref $RepoRef
     $text  = [Text.Encoding]::UTF8.GetString($bytes)
     $utf8BOM = New-Object System.Text.UTF8Encoding($true)   # UTF-8 com BOM
@@ -104,17 +114,21 @@ if (-not $RunningFromTarget) {
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("$Txt_ErrorPreparePrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
+    Write-UiLog "Falha no bootstrap: $($_.Exception.Message)"
     return
   }
 
+  # Reabrir a partir do arquivo salvo (console oculto aqui é ok)
   $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
+  Write-UiLog "Relançado do TargetPath."
   return
 }
 
 # Agora estamos em C:\ProgramData\UpdateW11\ui.ps1
 $ScriptPath = (Resolve-Path -LiteralPath $TargetPath).Path
+Write-UiLog "Iniciando UI. RePrompt=$RePrompt"
 
 # ==================== Helpers ====================
 function Test-IsAdmin {
@@ -146,14 +160,15 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
-  # IMPORTANTE: inclui -STA
-  $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File "' + $ScriptPath + '" -RePrompt'
+  # Para tarefa: janela visível (NÃO usar -WindowStyle Hidden)
+  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
   $args = @('/Create','/TN',$TaskName,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/F','/RL',$runLevel,'/RU',$ru,'/IT')
   $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) { throw "Falha ao criar a tarefa. Saída do schtasks:`n$output" }
+  Write-UiLog "Tarefa criada para $sd $st como $ru."
 }
 
 function Run-Now {
@@ -226,7 +241,16 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Arrastar a janela (sem barra de título)
+# Garantir visibilidade (traz pra frente e dá foco)
+$window.Topmost = $true
+$window.Loaded.Add({
+  try {
+    $window.Activate()      | Out-Null
+    $window.BringIntoView() | Out-Null
+  } catch { }
+})
+
+# Permitir arrastar a janela (sem barra de título)
 $window.Add_MouseLeftButtonDown({
   if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
     try { $window.DragMove() } catch { }
@@ -247,7 +271,7 @@ if ($RePrompt) {
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
-# Bloquear fechar (X/Alt+F4) — janela só fecha pelos botões
+# Bloquear fechar (Alt+F4 etc.) — janela só fecha pelos botões
 $script:closingHandler = [System.ComponentModel.CancelEventHandler]{
   param($sender, [System.ComponentModel.CancelEventArgs]$e)
   $e.Cancel = $true
