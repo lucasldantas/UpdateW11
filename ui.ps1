@@ -17,21 +17,9 @@ $RepoRef      = 'main'                # branch
 $RepoFilePath = 'ui.ps1'              # caminho do arquivo dentro do repo (case-sensitive)
 # =====================================================
 
-# ========== Garantir STA para WPF ==========
-try {
-  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
-    if ($RePrompt) { $args += '-RePrompt' }
-    Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $args | Out-Null
-    return
-  }
-} catch { }
-
 # ========== Função robusta para baixar o ui.ps1 do GitHub ==========
 function Get-UiFromGitHub {
-  param(
-    [string]$Owner, [string]$Repo, [string]$Path, [string]$Ref
-  )
+  param([string]$Owner, [string]$Repo, [string]$Path, [string]$Ref)
 
   $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
   $rawUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref/$Path"
@@ -121,6 +109,10 @@ function New-RePromptTask {
   if (-not (Test-Path -LiteralPath $PsExeFull)) { throw "powershell.exe não encontrado em '$PsExeFull'." }
   if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Script não encontrado em '$ScriptPath'." }
 
+  # Usuário atual (DOMAIN\user, AzureAD\user, MACHINE\user etc.)
+  $ru = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  if ([string]::IsNullOrWhiteSpace($ru)) { throw "Não foi possível resolver o usuário atual para /RU." }
+
   $runLevel = if (Test-IsAdmin) {'HIGHEST'} else {'NORMAL'}
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
@@ -130,7 +122,19 @@ function New-RePromptTask {
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
-  $args = @('/Create','/TN',$TaskName,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/F','/RL',$runLevel,'/IT')
+  # /RU + /IT garante que não rode como SYSTEM e não exige senha (roda com sessão do usuário)
+  $args = @(
+    '/Create',
+    '/TN', $TaskName,
+    '/TR', $trValue,
+    '/SC', 'ONCE',
+    '/SD', $sd,
+    '/ST', $st,
+    '/F',
+    '/RL', $runLevel,
+    '/RU', $ru,
+    '/IT'
+  )
   $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) { throw "Falha ao criar a tarefa. Saída do schtasks:`n$output" }
 }
