@@ -1,18 +1,34 @@
 #requires -version 5.1
 param([switch]$RePrompt)
 
-# --------------------------------------------------------------------
-#   UI de agendamento/execução com WPF (PT-BR)
-#   - Executar agora => roda $CommandToRun
-#   - Adiar 1h / 2h  => agenda reabertura desta UI para confirmar/rodar
-#   - Reaberta com -RePrompt => NÃO permite adiar de novo (só Executar)
-#   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 (UTF-8 BOM) e relança
-#   - Tarefa: schtasks.exe /RU (usuário atual) + /IT (sem pedir senha; exige sessão)
-#   - Janela sem “X” (WindowStyle=None), arrastável e bloqueada contra Alt+F4
-#   - Posicionamento: sempre no canto inferior direito acima da barra de tarefas
-# --------------------------------------------------------------------
-
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
+# ==================== TEXTOS / RÓTULOS (customizáveis) ====================
+$Txt_WindowTitle          = 'Agendar Execução'
+$Txt_HeaderTitle          = 'Atualização Obrigatória'
+$Txt_HeaderSubtitle       = 'Você pode executar agora ou adiar por até 2 horas.'
+$Txt_ActionLabel          = 'Ação:'
+$Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11'
+$Txt_ActionLine2          = 'Tempo Estimado: 20 a 30 minutos'
+
+$Txt_BtnNow               = 'Executar agora'
+$Txt_BtnDelay1            = 'Adiar 1 hora'
+$Txt_BtnDelay2            = 'Adiar 2 horas'
+
+$Txt_ConfirmTitle         = 'Atualização Obrigatória'
+$Txt_ConfirmSubtitle      = 'Chegou a hora agendada. Confirme a execução agora.'
+
+$Txt_ScheduledTitle       = 'Agendado'
+$Txt_ScheduledFmt         = 'Atualização agendada para {0:dd/MM/yyyy HH:mm}. Você receberá uma confirmação antes da execução.'
+
+$Txt_ErrorTitle           = 'Erro'
+$Txt_ErrorPreparePrefix   = 'Falha ao preparar a UI:'
+$Txt_ErrorSchedulePrefix  = 'Falha ao agendar:'
+$Txt_ErrorRunPrefix       = 'Falha ao executar:'
+$Txt_ErrorNoPS            = "powershell.exe não encontrado em '{0}'."
+$Txt_ErrorNoScript        = "Script não encontrado em '{0}'."
+$Txt_ErrorNoRU            = 'Não foi possível resolver o usuário atual para /RU.'
+# ==========================================================================
 
 # ==================== CONFIG GERAL ====================
 $AppRoot      = 'C:\ProgramData\UpdateW11'
@@ -53,12 +69,7 @@ function Get-UiFromGitHub {
       return ,([Text.Encoding]::UTF8.GetBytes($resp2.Content))
     } catch {
       $e2 = $_.Exception.Message
-      throw "Falha ao baixar UI.
-Tentativas:
-  1) API: $apiUrl
-     Erro: $e1
-  2) RAW: $rawUrl
-     Erro: $e2"
+      throw "Falha ao baixar UI.`nTentativas:`n  1) API: $apiUrl`n     Erro: $e1`n  2) RAW: $rawUrl`n     Erro: $e2"
     }
   }
 }
@@ -82,11 +93,10 @@ if (-not $RunningFromTarget) {
     [IO.File]::WriteAllText($TargetPath, $text, $utf8BOM)
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
-    [System.Windows.MessageBox]::Show("Falha ao preparar a UI:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+    [System.Windows.MessageBox]::Show("$Txt_ErrorPreparePrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
     return
   }
 
-  # Reabra a partir do arquivo salvo (com STA para WPF)
   $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
@@ -116,11 +126,11 @@ function New-RePromptTask {
   param([datetime]$when)
 
   Ensure-SchedulerRunning
-  if (-not (Test-Path -LiteralPath $PsExeFull)) { throw "powershell.exe não encontrado em '$PsExeFull'." }
-  if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Script não encontrado em '$ScriptPath'." }
+  if (-not (Test-Path -LiteralPath $PsExeFull)) { throw ($Txt_ErrorNoPS -f $PsExeFull) }
+  if (-not (Test-Path -LiteralPath $ScriptPath)) { throw ($Txt_ErrorNoScript -f $ScriptPath) }
 
   $ru = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  if ([string]::IsNullOrWhiteSpace($ru)) { throw "Não foi possível resolver o usuário atual para /RU." }
+  if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
   $runLevel = if (Test-IsAdmin) {'HIGHEST'} else {'NORMAL'}
   $sd = $when.ToString('dd/MM/yyyy')
@@ -130,13 +140,7 @@ function New-RePromptTask {
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
-  $args = @(
-    '/Create','/TN',$TaskName,
-    '/TR',$trValue,
-    '/SC','ONCE','/SD',$sd,'/ST',$st,
-    '/F','/RL',$runLevel,
-    '/RU',$ru,'/IT'
-  )
+  $args = @('/Create','/TN',$TaskName,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/F','/RL',$runLevel,'/RU',$ru,'/IT')
   $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) { throw "Falha ao criar a tarefa. Saída do schtasks:`n$output" }
 }
@@ -144,7 +148,7 @@ function New-RePromptTask {
 function Run-Now {
   Remove-RePromptTask
   try { & $CommandToRun } catch {
-    [System.Windows.MessageBox]::Show("Falha ao executar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+    [System.Windows.MessageBox]::Show("$Txt_ErrorRunPrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
   }
 }
 
@@ -154,9 +158,9 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Agendar Execução"
+        Title="$Txt_WindowTitle"
         Width="520" MinHeight="300" SizeToContent="Height"
-        WindowStartupLocation="Manual"
+        WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize" Background="#0f172a"
         WindowStyle="None" ShowInTaskbar="True">
   <Grid Margin="16">
@@ -170,9 +174,9 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
     <!-- Cabeçalho -->
     <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
       <StackPanel>
-        <TextBlock Name="TitleText" Text="Atualização Obrigatória" Foreground="#e5e7eb"
+        <TextBlock Name="TitleText" Text="$Txt_HeaderTitle" Foreground="#e5e7eb"
                    FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
-        <TextBlock Name="SubText" Text="Você pode executar agora ou adiar por até 2 horas."
+        <TextBlock Name="SubText" Text="$Txt_HeaderSubtitle"
                    Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
       </StackPanel>
     </Border>
@@ -180,11 +184,11 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
     <!-- Corpo -->
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <StackPanel>
-        <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
-        <TextBlock Text="Realizar o update do Windows 10 para o Windows 11"
+        <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
+        <TextBlock Text="$Txt_ActionLine1"
                    Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
                    Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
-        <TextBlock Text="Tempo Estimado: 20 a 30 minutos"
+        <TextBlock Text="$Txt_ActionLine2"
                    Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
                    Background="#0b1220" TextWrapping="Wrap"/>
       </StackPanel>
@@ -193,13 +197,13 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
     <!-- Botões -->
     <DockPanel Grid.Row="3">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button Name="BtnNow" Content="Executar agora" Margin="8,0,0,0" Padding="16,8"
+        <Button Name="BtnNow" Content="$Txt_BtnNow" Margin="8,0,0,0" Padding="16,8"
                 Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold"
                 BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
-        <Button Name="BtnDelay1" Content="Adiar 1 hora" Margin="8,0,0,0" Padding="16,8"
+        <Button Name="BtnDelay1" Content="$Txt_BtnDelay1" Margin="8,0,0,0" Padding="16,8"
                 Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
                 BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
-        <Button Name="BtnDelay2" Content="Adiar 2 horas" Margin="8,0,0,0" Padding="16,8"
+        <Button Name="BtnDelay2" Content="$Txt_BtnDelay2" Margin="8,0,0,0" Padding="16,8"
                 Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
                 BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
       </StackPanel>
@@ -226,13 +230,13 @@ $SubTxt    = $window.FindName('SubText')
 
 # RePrompt: sem opções de adiar
 if ($RePrompt) {
-  $TitleTxt.Text = "Confirmação de execução"
-  $SubTxt.Text   = "Chegou a hora agendada. Confirme a execução agora."
+  $TitleTxt.Text = $Txt_ConfirmTitle
+  $SubTxt.Text   = $Txt_ConfirmSubtitle
   $BtnDelay1.Visibility = 'Collapsed'
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
-# -------- Impedir fechar com Alt+F4/Close --------
+# Bloquear fechar (X/Alt+F4) — janela só fecha pelos botões
 $script:closingHandler = [System.ComponentModel.CancelEventHandler]{
   param($sender, [System.ComponentModel.CancelEventArgs]$e)
   $e.Cancel = $true
@@ -254,9 +258,9 @@ $BtnDelay1.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+    [System.Windows.MessageBox]::Show("$Txt_ErrorSchedulePrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
   }
   Allow-Close $window
   $window.Close()
@@ -267,19 +271,12 @@ $BtnDelay2.Add_Click({
   try {
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
-    [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
+    [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+    [System.Windows.MessageBox]::Show("$Txt_ErrorSchedulePrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
   }
   Allow-Close $window
   $window.Close()
-})
-
-# -------- Posicionar no canto inferior direito (acima da taskbar) --------
-$window.SourceInitialized.Add({
-  $wa = [System.Windows.SystemParameters]::WorkArea
-  $window.Left = $wa.Right  - $window.ActualWidth  - 20
-  $window.Top  = $wa.Bottom - $window.ActualHeight - 20
 })
 
 $null = $window.ShowDialog()
