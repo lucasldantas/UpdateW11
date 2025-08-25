@@ -15,11 +15,11 @@ $Txt_BtnNow               = 'Executar agora'
 $Txt_BtnDelay1            = 'Adiar 1 hora'
 $Txt_BtnDelay2            = 'Adiar 2 horas'
 
-$Txt_ConfirmTitle         = 'Atualização Obrigatória'
+$Txt_ConfirmTitle         = 'Confirmação de execução'
 $Txt_ConfirmSubtitle      = 'Chegou a hora agendada. Confirme a execução agora.'
 
 $Txt_ScheduledTitle       = 'Agendado'
-$Txt_ScheduledFmt         = 'Atualização agendada para {0:dd/MM/yyyy HH:mm}. Você receberá uma confirmação antes da execução.'
+$Txt_ScheduledFmt         = 'Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução.'
 
 $Txt_ErrorTitle           = 'Erro'
 $Txt_ErrorPreparePrefix   = 'Falha ao preparar a UI:'
@@ -45,6 +45,16 @@ $RepoName     = 'UpdateW11'
 $RepoRef      = 'main'                # branch
 $RepoFilePath = 'ui.ps1'              # caminho do arquivo no repo
 # =====================================================
+
+# ========== GARANTIR STA (WPF PRECISA) ==========
+try {
+  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
+    if ($RePrompt) { $args += '-RePrompt' }
+    Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
+    return
+  }
+} catch { }
 
 # ========== Download robusto do GitHub ==========
 function Get-UiFromGitHub {
@@ -136,7 +146,8 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
-  $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
+  # IMPORTANTE: inclui -STA
+  $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
@@ -215,7 +226,7 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Permitir arrastar a janela (sem barra de título)
+# Arrastar a janela (sem barra de título)
 $window.Add_MouseLeftButtonDown({
   if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
     try { $window.DragMove() } catch { }
