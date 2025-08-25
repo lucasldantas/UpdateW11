@@ -173,7 +173,8 @@ function Ensure-WorkerScript {
 }
 function Ensure-WorkerTask {
   Ensure-WorkerScript
-  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -File "' + $WorkerPath + '"'
+  # >>> Worker sem console
+  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $WorkerPath + '"'
   $exists = (schtasks /Query /TN $WorkerTaskName 2>$null)
   if (-not $?) {
     schtasks /Create /TN $WorkerTaskName /TR $trValue /SC ONCE /SD 01/01/2099 /ST 00:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
@@ -182,7 +183,7 @@ function Ensure-WorkerTask {
   }
 }
 
-# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível)
+# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível mas sem console)
 function New-RePromptTask {
   param([datetime]$when)
 
@@ -194,7 +195,8 @@ function New-RePromptTask {
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
   $sd = $when.ToString('dd/MM/yyyy'); $st = $when.ToString('HH:mm')
-  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -STA -File "' + $ScriptPath + '" -RePrompt'
+  # >>> UI sem console (a UI própria é WPF e aparecerá normalmente)
+  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {}
 
@@ -279,7 +281,7 @@ $reader  = New-Object System.Xml.XmlNodeReader $xaml
 $window  = [Windows.Markup.XamlReader]::Load($reader)
 if (-not $window) { throw "Falha ao carregar a UI a partir do XAML." }
 
-# Garantir visibilidade e foco (usar Add_Loaded em PS 5.1)
+# Garantir visibilidade e foco (PS 5.1: Add_Loaded)
 $window.Topmost = $true
 $window.Add_Loaded({
   try {
@@ -332,7 +334,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    # para teste rápido, troque para .AddMinutes(2)
+    # para teste rápido use .AddMinutes(2)
     $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
