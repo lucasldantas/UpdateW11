@@ -6,15 +6,14 @@
   - Na reabertura (via -RePrompt), **não permite adiar novamente** — apenas Executar agora
 #>
 
-param(
-  [switch]$RePrompt  # setado quando a tarefa reabre a UI para confirmação final
-)
+param([switch]$RePrompt)
 
 # ============ CONFIG ============
-$TaskName        = "GDL-AgendarScriptTeste"
-$PsExeFull       = Join-Path $PSHOME 'powershell.exe'   # caminho absoluto do PowerShell
-$ScriptPath      = "C:\Scripts\Agendar-Script.ps1"      # <-- AJUSTE para onde você salvar este script
-$CommandToRun    = { & msg * 'Teste' }                  # <-- Troque pelo comando real quando quiser
+$TaskName     = "GDL-AgendarScriptTeste"
+$PsExeFull    = Join-Path $PSHOME 'powershell.exe'         # caminho absoluto do PowerShell
+# Descobre o caminho do PRÓPRIO script, sem hardcode
+$ScriptPath   = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
+$CommandToRun = { & msg * 'Teste' }                         # <-- troque aqui pelo comando real quando quiser
 # =================================
 
 # ---------- Helpers ----------
@@ -43,21 +42,26 @@ function New-RePromptTask {
   if (-not (Test-Path -LiteralPath $PsExeFull)) {
     throw "powershell.exe não encontrado em '$PsExeFull'."
   }
-  if (-not (Test-Path -LiteralPath $ScriptPath)) {
-    throw "Script não encontrado em '$ScriptPath'. Salve este arquivo nesse caminho ou ajuste `$ScriptPath."
+
+  # Se o usuário colar o código direto no console/ISE, $ScriptPath pode ser $null.
+  if ([string]::IsNullOrWhiteSpace($ScriptPath) -or -not (Test-Path -LiteralPath $ScriptPath)) {
+    throw "Não foi possível detectar o caminho deste script. Salve-o em um arquivo .ps1 e execute-o desse arquivo."
   }
+
+  # Normaliza para caminho absoluto e com casing correto
+  $ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
 
   $runLevel = if (Test-IsAdmin) { 'HIGHEST' } else { 'NORMAL' }
   $sd = $when.ToString('dd/MM/yyyy')  # pt-BR
   $st = $when.ToString('HH:mm')       # 24h
 
-  # /TR precisa ser um ÚNICO valor (string) com EXE entre aspas + argumentos
+  # /TR precisa ser UM ÚNICO valor (string):
   $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
   # Remove tarefa anterior se existir (silencioso)
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
 
-  # Monta os parâmetros em ARRAY; cada item é um token seguro
+  # Monta parâmetros como array (cada token separado) e executa diretamente (&)
   $args = @(
     '/Create',
     '/TN', $TaskName,
@@ -148,13 +152,13 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 $reader = (New-Object System.Xml.XmlNodeReader $xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-$BtnNow   = $window.FindName('BtnNow')
-$BtnDelay1= $window.FindName('BtnDelay1')
-$BtnDelay2= $window.FindName('BtnDelay2')
-$TitleTxt = $window.FindName('TitleText')
-$SubTxt   = $window.FindName('SubText')
+$BtnNow    = $window.FindName('BtnNow')
+$BtnDelay1 = $window.FindName('BtnDelay1')
+$BtnDelay2 = $window.FindName('BtnDelay2')
+$TitleTxt  = $window.FindName('TitleText')
+$SubTxt    = $window.FindName('SubText')
 
-# Se foi reaberto pela tarefa (RePrompt), desabilita/remova botões de adiar
+# Se foi reaberto pela tarefa (RePrompt), sem nova opção de adiar
 if ($RePrompt) {
   $TitleTxt.Text = "Confirmação de execução"
   $SubTxt.Text   = "Chegou a hora agendada. Confirme a execução agora."
@@ -175,7 +179,7 @@ $BtnDelay1.Add_Click({
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show("Agendado para $($runAt.ToString('dd/MM/yyyy HH:mm')). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
   } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar: `n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
+    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
   }
   $window.Close()
 })
@@ -187,7 +191,7 @@ $BtnDelay2.Add_Click({
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show("Agendado para $($runAt.ToString('dd/MM/yyyy HH:mm')). A janela será reaberta nessa hora para confirmar a execução.", "Agendado", 'OK', 'Information') | Out-Null
   } catch {
-    [System.Windows.MessageBox]::Show("Falha ao agendar: `n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
+    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
   }
   $window.Close()
 })
