@@ -57,7 +57,7 @@ function Write-UiLog([string]$msg) {
 
 # ========== GARANTIR STA (WPF PRECISA) ==========
 try {
-  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
     Write-UiLog "Relançando em STA. RePrompt=$RePrompt"
     $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
     if ($RePrompt) { $args += '-RePrompt' }
@@ -160,8 +160,8 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
-  # Para tarefa: janela visível (NÃO usar -WindowStyle Hidden)
-  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -STA -File "' + $ScriptPath + '" -RePrompt'
+  # Para tarefa: janela visível e STA
+  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
@@ -241,12 +241,15 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Garantir visibilidade (traz pra frente e dá foco)
+# Garantir visibilidade e foco quando aberta pela tarefa
 $window.Topmost = $true
 $window.Loaded.Add({
   try {
-    $window.Activate()      | Out-Null
-    $window.BringIntoView() | Out-Null
+    $null = $window.Activate()
+    $null = $window.BringIntoView()
+    [System.Windows.Threading.DispatcherTimer]::new([TimeSpan]::FromMilliseconds(150), 'Normal', {
+      try { $null = $window.Activate() } catch {}
+    }, $window.Dispatcher) | Out-Null
   } catch { }
 })
 
@@ -291,7 +294,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddMinutes(1)
+    $runAt=(Get-Date).AddHours(1)   # mude para .AddMinutes(2) se quiser testar rápido
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -315,4 +318,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
