@@ -39,14 +39,14 @@ $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $PsExeFull       = Join-Path $PSHOME 'powershell.exe'
 $LogPath         = Join-Path $AppRoot 'ui.log'
 
-# Comando real (fica no worker.ps1). Aqui só para bootstrap.
+# Conteúdo padrão do worker (será criado se não existir; troque no arquivo)
 $DefaultWorkerBody = @'
 # worker.ps1 (executa como SYSTEM)
 # Troque o comando abaixo pelo real:
 msg * "Executando tarefa elevada (SYSTEM) — exemplo"
 '@
 
-# Repo (ajuste se necessário) — usado no bootstrap quando rodar via IEX
+# Repo (quando executando via IEX/GitHub)
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
 $RepoRef      = 'main'         # branch
@@ -86,7 +86,8 @@ function Get-UiFromGitHub {
   } catch {
     $e1=$_.Exception.Message
     try {
-      $rawHeaders=@{ 'User-Agent'='ps' }; if ($script:t -and $t) { $rawHeaders['Authorization']="token $t" }
+      $rawHeaders=@{ 'User-Agent'='ps' }
+      if ($script:t -and $t) { $rawHeaders['Authorization']="token $t" }
       $resp2 = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
       return ,([Text.Encoding]::UTF8.GetBytes($resp2.Content))
     } catch { $e2=$_.Exception.Message; throw "Falha baixar UI:`n1) $apiUrl -> $e1`n2) $rawUrl -> $e2" }
@@ -95,7 +96,10 @@ function Get-UiFromGitHub {
 
 # ---------- Bootstrap local ----------
 if (-not (Test-Path -LiteralPath $AppRoot)) { New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null }
-$SelfPath = $PSCommandPath ?? $MyInvocation.MyCommand.Path
+
+# $SelfPath para PS 5.1 (sem ??)
+if ($PSCommandPath) { $SelfPath = $PSCommandPath } else { $SelfPath = $MyInvocation.MyCommand.Path }
+
 $RunningFromTarget = $false
 try {
   $RunningFromTarget = (Resolve-Path $SelfPath -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $TargetPath -ErrorAction SilentlyContinue).Path
@@ -139,7 +143,6 @@ function Get-ActiveConsoleUser {
     $expl = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($expl -and $expl.UserName) { return $expl.UserName }
   } catch {}
-
   try {
     $out = (quser) 2>$null
     foreach ($line in $out) {
@@ -152,7 +155,6 @@ function Get-ActiveConsoleUser {
       }
     }
   } catch {}
-
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
@@ -170,12 +172,11 @@ function Ensure-WorkerTask {
   if (-not $?) {
     schtasks /Create /TN $WorkerTaskName /TR $trValue /SC ONCE /SD 01/01/2099 /ST 00:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
   } else {
-    # Se já existe, atualiza ação caso mude o caminho
     schtasks /Change /TN $WorkerTaskName /TR $trValue | Out-Null
   }
 }
 
-# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, com janela visível)
+# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível)
 function New-RePromptTask {
   param([datetime]$when)
 
@@ -194,7 +195,7 @@ function New-RePromptTask {
   schtasks /Create /TN $TaskNameUI /TR $trValue /SC ONCE /SD $sd /ST $st /RL HIGHEST /RU $ru /IT /F | Out-Null
 }
 
-# -------- Execução do comando (agora dispara o worker SYSTEM) --------
+# -------- Executar agora: dispara o worker SYSTEM --------
 function Run-Now {
   try {
     Ensure-WorkerTask
@@ -276,9 +277,7 @@ $window.Loaded.Add({
   try {
     $null = $window.Activate()
     $null = $window.BringIntoView()
-    [System.Windows.Threading.DispatcherTimer]::new([TimeSpan]::FromMilliseconds(150), 'Normal', {
-      try { $null = $window.Activate() } catch {}
-    }, $window.Dispatcher) | Out-Null
+    [System.Windows.Threading.DispatcherTimer]::new([TimeSpan]::FromMilliseconds(150), 'Normal', { try { $null = $window.Activate() } catch {} }, $window.Dispatcher) | Out-Null
   } catch {}
 })
 
@@ -316,7 +315,8 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddMinutes(2)   # use .AddMinutes(2) para teste rápido
+    # use .AddMinutes(2) para teste rápido
+    $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -338,5 +338,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
-
