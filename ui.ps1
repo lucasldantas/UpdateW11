@@ -2,13 +2,13 @@
 param([switch]$RePrompt)
 
 # --------------------------------------------------------------------
-#   UI de agendamento/execução com WPF (PT-BR, acentuação correta)
+#   UI de agendamento/execução com WPF (PT-BR)
 #   - Executar agora => roda $CommandToRun
 #   - Adiar 1h / 2h  => agenda reabertura desta UI para confirmar/rodar
 #   - Reaberta com -RePrompt => NÃO permite adiar de novo (só Executar)
 #   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 (UTF-8 BOM) e relança
 #   - Tarefa: schtasks.exe /RU (usuário atual) + /IT (sem pedir senha; exige sessão)
-#   - Bloqueio: impede fechar com X/Alt+F4; só botões liberam o fechamento
+#   - Janela sem “X” (WindowStyle=None) + arrastar pela área vazia + bloqueio Alt+F4
 # --------------------------------------------------------------------
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -156,7 +156,8 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
         Title="Agendar Execução"
         Width="520" MinHeight="300" SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize" Background="#0f172a">
+        ResizeMode="NoResize" Background="#0f172a"
+        WindowStyle="None" ShowInTaskbar="True">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -209,6 +210,13 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
+# Permitir arrastar a janela (sem barra de título)
+$window.Add_MouseLeftButtonDown({
+  if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+    try { $window.DragMove() } catch { }
+  }
+})
+
 $BtnNow    = $window.FindName('BtnNow')
 $BtnDelay1 = $window.FindName('BtnDelay1')
 $BtnDelay2 = $window.FindName('BtnDelay2')
@@ -223,19 +231,18 @@ if ($RePrompt) {
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
-# -------- Impedir fechar com X/Alt+F4 (só botões liberam) --------
-$closingHandler = [System.ComponentModel.CancelEventHandler]{
+# -------- Impedir fechar com Alt+F4/ESC/Close --------
+$script:closingHandler = [System.ComponentModel.CancelEventHandler]{
   param($sender, [System.ComponentModel.CancelEventArgs]$e)
   $e.Cancel = $true
 }
-$window.add_Closing($closingHandler)
+$window.add_Closing($script:closingHandler)
 
-function Allow-Close {
-  param([System.Windows.Window]$win)
+function Allow-Close([System.Windows.Window]$win) {
   if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) }
 }
 
-# Eventos
+# -------- Eventos --------
 $BtnNow.Add_Click({
   Allow-Close $window
   $window.Close()
