@@ -1,6 +1,18 @@
 #requires -version 5.1
 param([switch]$RePrompt)
 
+# --------------------------------------------------------------------
+#   UI de agendamento/execução com WPF (PT-BR, acentuação correta)
+#   - Executar agora => roda $CommandToRun
+#   - Adiar 1h / 2h  => agenda reabertura desta UI para confirmar/rodar
+#   - Reaberta com -RePrompt => NÃO permite adiar de novo (só Executar)
+#   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 e relança
+#   - Tarefa: schtasks.exe /RU (usuário atual) + /IT (sem pedir senha; exige sessão)
+# --------------------------------------------------------------------
+
+# (ajuda com consoles que não estão em UTF-8; o XAML já está em Unicode)
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
 # ==================== CONFIG GERAL ====================
 $AppRoot      = 'C:\ProgramData\UpdateW11'
 $TargetPath   = Join-Path $AppRoot 'ui.ps1'
@@ -14,17 +26,16 @@ $CommandToRun = { & msg * 'Teste' }   # <-- troque depois pelo comando real
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
 $RepoRef      = 'main'                # branch
-$RepoFilePath = 'ui.ps1'              # caminho do arquivo dentro do repo (case-sensitive)
+$RepoFilePath = 'ui.ps1'              # caminho do arquivo no repo (case-sensitive)
 # =====================================================
 
-# ========== Função robusta para baixar o ui.ps1 do GitHub ==========
+# ========== Download robusto do GitHub ==========
 function Get-UiFromGitHub {
   param([string]$Owner, [string]$Repo, [string]$Path, [string]$Ref)
 
   $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
   $rawUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref/$Path"
 
-  # Usa token $t se vier do bootstrap
   $headers = @{ 'User-Agent'='ps'; 'Accept'='application/vnd.github+json' }
   if ($script:t -and $t) { $headers['Authorization'] = "token $t" }
 
@@ -34,7 +45,6 @@ function Get-UiFromGitHub {
     return ,([Convert]::FromBase64String($resp.content))
   } catch {
     $e1 = $_.Exception.Message
-    # Fallback: tentar RAW (público)
     try {
       $rawHeaders = @{ 'User-Agent'='ps' }
       if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }
@@ -57,7 +67,6 @@ if (-not (Test-Path -LiteralPath $AppRoot)) {
   New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
 }
 
-# Detecta se estamos rodando "colado" (IEX) ou já do arquivo-alvo
 $SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
 $RunningFromTarget = $false
 try {
@@ -74,8 +83,8 @@ if (-not $RunningFromTarget) {
     return
   }
 
-  # Relança do arquivo salvo (preserva -RePrompt)
-  $args = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File', $TargetPath)
+  # Reabra a partir do arquivo salvo (força -STA para WPF)
+  $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
   return
@@ -122,7 +131,7 @@ function New-RePromptTask {
 
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
-  # /RU + /IT garante que não rode como SYSTEM e não exige senha (roda com sessão do usuário)
+  # /RU + /IT: agenda no usuário atual e não pede senha; exige sessão para exibir UI
   $args = @(
     '/Create',
     '/TN', $TaskName,
@@ -161,24 +170,40 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
+
+    <!-- Cabeçalho -->
     <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
       <StackPanel>
-        <TextBlock Name="TitleText" Text="Atualização Obrigatória" Foreground="#e5e7eb" FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
-        <TextBlock Name="SubText" Text="Você pode executar agora ou adiar por até 2 horas." Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
+        <TextBlock Name="TitleText" Text="Atualização Obrigatória" Foreground="#e5e7eb"
+                   FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
+        <TextBlock Name="SubText" Text="Você pode executar agora ou adiar por até 2 horas."
+                   Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
       </StackPanel>
     </Border>
+
+    <!-- Corpo -->
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <StackPanel>
         <TextBlock Text="Ação:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
-        <TextBlock Text='Realizar o update do Windows 10 para o Windows 11' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
-        <TextBlock Text='Tempo Estimado: 20 a 30 minutos' Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
+        <TextBlock Text="Realizar o update do Windows 10 para o Windows 11"
+                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
+        <TextBlock Text="Tempo Estimado: 20 a 30 minutos"
+                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220"/>
       </StackPanel>
     </Border>
+
+    <!-- Botões -->
     <DockPanel Grid.Row="3">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button Name="BtnNow" Content="Executar agora" Margin="8,0,0,0" Padding="16,8" Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold" BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
-        <Button Name="BtnDelay1" Content="Adiar 1 hora" Margin="8,0,0,0" Padding="16,8" Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI" BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
-        <Button Name="BtnDelay2" Content="Adiar 2 horas" Margin="8,0,0,0" Padding="16,8" Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI" BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnNow" Content="Executar agora" Margin="8,0,0,0" Padding="16,8"
+                Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold"
+                BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnDelay1" Content="Adiar 1 hora" Margin="8,0,0,0" Padding="16,8"
+                Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
+                BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnDelay2" Content="Adiar 2 horas" Margin="8,0,0,0" Padding="16,8"
+                Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
+                BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
       </StackPanel>
     </DockPanel>
   </Grid>
