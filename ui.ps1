@@ -6,9 +6,9 @@ param([switch]$RePrompt)
 #   - Executar agora => roda $CommandToRun
 #   - Adiar 1h / 2h  => agenda reabertura desta UI para confirmar/rodar
 #   - Reaberta com -RePrompt => NÃO permite adiar de novo (só Executar)
-#   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 e relança
+#   - Bootstrap: se rodar via IEX, baixa/salva em C:\ProgramData\UpdateW11\ui.ps1 (UTF-8 BOM) e relança
 #   - Tarefa: schtasks.exe /RU (usuário atual) + /IT (sem pedir senha; exige sessão)
-#   - Salva sempre como UTF-8 BOM (garante acentos corretos no PowerShell 5.1)
+#   - Bloqueio: impede fechar com X/Alt+F4; só botões liberam o fechamento
 # --------------------------------------------------------------------
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -19,8 +19,8 @@ $TargetPath   = Join-Path $AppRoot 'ui.ps1'
 $TaskName     = 'GDL-AgendarScriptTeste'
 $PsExeFull    = Join-Path $PSHOME 'powershell.exe'
 
-# Comando real que você quer executar ao clicar "Executar agora":
-$CommandToRun = { & msg * 'Teste' }   # <-- troque depois pelo comando real
+# Comando real ao clicar "Executar agora":
+$CommandToRun = { & msg * 'Teste' }   # <-- troque aqui pelo comando real
 
 # Repo (ajuste se necessário)
 $RepoOwner    = 'lucasldantas'
@@ -85,7 +85,7 @@ if (-not $RunningFromTarget) {
     return
   }
 
-  # Reabra a partir do arquivo salvo
+  # Reabra a partir do arquivo salvo (com STA para WPF)
   $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File', $TargetPath)
   if ($RePrompt) { $args += '-RePrompt' }
   Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
@@ -109,9 +109,7 @@ function Ensure-SchedulerRunning {
     }
   } catch { }
 }
-function Remove-RePromptTask {
-  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
-}
+function Remove-RePromptTask { try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { } }
 
 function New-RePromptTask {
   param([datetime]$when)
@@ -132,16 +130,11 @@ function New-RePromptTask {
   try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
   $args = @(
-    '/Create',
-    '/TN', $TaskName,
-    '/TR', $trValue,
-    '/SC', 'ONCE',
-    '/SD', $sd,
-    '/ST', $st,
-    '/F',
-    '/RL', $runLevel,
-    '/RU', $ru,
-    '/IT'
+    '/Create','/TN',$TaskName,
+    '/TR',$trValue,
+    '/SC','ONCE','/SD',$sd,'/ST',$st,
+    '/F','/RL',$runLevel,
+    '/RU',$ru,'/IT'
   )
   $output = & schtasks.exe @args 2>&1
   if ($LASTEXITCODE -ne 0) { throw "Falha ao criar a tarefa. Saída do schtasks:`n$output" }
@@ -160,12 +153,10 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Agendar Execução" Width="520"
-        MinHeight="300" SizeToContent="Height"
+        Title="Agendar Execução"
+        Width="520" MinHeight="300" SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize" Background="#0f172a"
-        WindowStyle="None" 
-        ShowInTaskbar="True">
+        ResizeMode="NoResize" Background="#0f172a">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -224,6 +215,7 @@ $BtnDelay2 = $window.FindName('BtnDelay2')
 $TitleTxt  = $window.FindName('TitleText')
 $SubTxt    = $window.FindName('SubText')
 
+# RePrompt: sem opções de adiar
 if ($RePrompt) {
   $TitleTxt.Text = "Confirmação de execução"
   $SubTxt.Text   = "Chegou a hora agendada. Confirme a execução agora."
@@ -231,8 +223,24 @@ if ($RePrompt) {
   $BtnDelay2.Visibility = 'Collapsed'
 }
 
+# -------- Impedir fechar com X/Alt+F4 (só botões liberam) --------
+$closingHandler = [System.ComponentModel.CancelEventHandler]{
+  param($sender, [System.ComponentModel.CancelEventArgs]$e)
+  $e.Cancel = $true
+}
+$window.add_Closing($closingHandler)
+
+function Allow-Close {
+  param([System.Windows.Window]$win)
+  if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) }
+}
+
 # Eventos
-$BtnNow.Add_Click({ $window.Close(); Run-Now })
+$BtnNow.Add_Click({
+  Allow-Close $window
+  $window.Close()
+  Run-Now
+})
 
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
@@ -243,6 +251,7 @@ $BtnDelay1.Add_Click({
   } catch {
     [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
   }
+  Allow-Close $window
   $window.Close()
 })
 
@@ -255,11 +264,8 @@ $BtnDelay2.Add_Click({
   } catch {
     [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
   }
+  Allow-Close $window
   $window.Close()
 })
 
 $null = $window.ShowDialog()
-
-
-
-
