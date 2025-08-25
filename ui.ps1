@@ -6,20 +6,33 @@ $AppRoot      = 'C:\ProgramData\UpdateW11'
 $TargetPath   = Join-Path $AppRoot 'ui.ps1'
 $TaskName     = 'GDL-AgendarScriptTeste'
 $PsExeFull    = Join-Path $PSHOME 'powershell.exe'
-$CommandToRun = { & msg * 'Teste' }     # <-- troque depois pelo comando real
+
+# Comando real que você quer executar ao clicar "Executar agora":
+$CommandToRun = { & msg * 'Teste' }   # <-- troque depois pelo comando real
 
 # Repo (ajuste se necessário)
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
-$RepoRef      = 'main'                  # branch
-$RepoFilePath = 'ui.ps1'                # caminho do arquivo dentro do repo (case-sensitive)
+$RepoRef      = 'main'                # branch
+$RepoFilePath = 'ui.ps1'              # caminho do arquivo dentro do repo (case-sensitive)
 # =====================================================
 
-# ========== Função robusta para baixar o ui.ps1 ==========
+# ========== Garantir STA para WPF ==========
+try {
+  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
+    if ($RePrompt) { $args += '-RePrompt' }
+    Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $args | Out-Null
+    return
+  }
+} catch { }
+
+# ========== Função robusta para baixar o ui.ps1 do GitHub ==========
 function Get-UiFromGitHub {
   param(
     [string]$Owner, [string]$Repo, [string]$Path, [string]$Ref
   )
+
   $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
   $rawUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref/$Path"
 
@@ -33,20 +46,22 @@ function Get-UiFromGitHub {
     return ,([Convert]::FromBase64String($resp.content))
   } catch {
     $e1 = $_.Exception.Message
-# Fallback: tentar RAW (só funciona se o repo/arquivo for público)
-try {
-  $rawHeaders = @{ 'User-Agent'='ps' }
-  if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }
-  $resp = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
-  return ,([Text.Encoding]::UTF8.GetBytes($resp.Content))
-} catch {
-  $e2 = $_.Exception.Message
-  throw "Falha ao baixar UI.
+    # Fallback: tentar RAW (público)
+    try {
+      $rawHeaders = @{ 'User-Agent'='ps' }
+      if ($script:t -and $t) { $rawHeaders['Authorization'] = "token $t" }
+      $resp2 = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
+      return ,([Text.Encoding]::UTF8.GetBytes($resp2.Content))
+    } catch {
+      $e2 = $_.Exception.Message
+      throw "Falha ao baixar UI.
 Tentativas:
   1) API: $apiUrl
      Erro: $e1
   2) RAW: $rawUrl
      Erro: $e2"
+    }
+  }
 }
 
 # ==================== Bootstrap local ====================
@@ -54,18 +69,19 @@ if (-not (Test-Path -LiteralPath $AppRoot)) {
   New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
 }
 
-# Detecta se estamos rodando "colado" (IEX) ou de arquivo
+# Detecta se estamos rodando "colado" (IEX) ou já do arquivo-alvo
 $SelfPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
 $RunningFromTarget = $false
 try {
   $RunningFromTarget = (Resolve-Path $SelfPath -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $TargetPath -ErrorAction SilentlyContinue).Path
-} catch {}
+} catch { }
 
 if (-not $RunningFromTarget) {
   try {
     $bytes = Get-UiFromGitHub -Owner $RepoOwner -Repo $RepoName -Path $RepoFilePath -Ref $RepoRef
     [IO.File]::WriteAllBytes($TargetPath, $bytes)
   } catch {
+    Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("Falha ao preparar a UI:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
     return
   }
@@ -88,15 +104,19 @@ function Test-IsAdmin {
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
-    if ($svc.Status -ne 'Running') { Start-Service -Name 'Schedule' -ErrorAction Stop; $svc.WaitForStatus('Running','00:00:05') | Out-Null }
-  } catch {}
+    if ($svc.Status -ne 'Running') {
+      Start-Service -Name 'Schedule' -ErrorAction Stop
+      $svc.WaitForStatus('Running','00:00:05') | Out-Null
+    }
+  } catch { }
 }
 function Remove-RePromptTask {
-  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
+  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 }
 
 function New-RePromptTask {
   param([datetime]$when)
+
   Ensure-SchedulerRunning
   if (-not (Test-Path -LiteralPath $PsExeFull)) { throw "powershell.exe não encontrado em '$PsExeFull'." }
   if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Script não encontrado em '$ScriptPath'." }
@@ -105,9 +125,10 @@ function New-RePromptTask {
   $sd = $when.ToString('dd/MM/yyyy')
   $st = $when.ToString('HH:mm')
 
+  # /TR: um único valor com aspas corretas
   $trValue = '"' + $PsExeFull + '" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RePrompt'
 
-  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch {}
+  try { & schtasks.exe /Delete /TN $TaskName /F | Out-Null } catch { }
 
   $args = @('/Create','/TN',$TaskName,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/F','/RL',$runLevel,'/IT')
   $output = & schtasks.exe @args 2>&1
@@ -162,8 +183,12 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$BtnNow=$window.FindName('BtnNow'); $BtnDelay1=$window.FindName('BtnDelay1'); $BtnDelay2=$window.FindName('BtnDelay2')
-$TitleTxt=$window.FindName('TitleText'); $SubTxt=$window.FindName('SubText')
+
+$BtnNow    = $window.FindName('BtnNow')
+$BtnDelay1 = $window.FindName('BtnDelay1')
+$BtnDelay2 = $window.FindName('BtnDelay2')
+$TitleTxt  = $window.FindName('TitleText')
+$SubTxt    = $window.FindName('SubText')
 
 if ($RePrompt) {
   $TitleTxt.Text = "Confirmação de execução"
@@ -181,7 +206,9 @@ $BtnDelay1.Add_Click({
     $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
-  } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
+  } catch {
+    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+  }
   $window.Close()
 })
 
@@ -191,7 +218,9 @@ $BtnDelay2.Add_Click({
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(("Agendado para {0:dd/MM/yyyy HH:mm}. A janela será reaberta nessa hora para confirmar a execução." -f $runAt),"Agendado",'OK','Information') | Out-Null
-  } catch { [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null }
+  } catch {
+    [System.Windows.MessageBox]::Show("Falha ao agendar:`n$($_.Exception.Message)","Erro",'OK','Error') | Out-Null
+  }
   $window.Close()
 })
 
