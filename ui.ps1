@@ -41,8 +41,7 @@ $LogPath         = Join-Path $AppRoot 'ui.log'
 
 # Conteúdo padrão do worker (será criado se não existir; troque no arquivo)
 $DefaultWorkerBody = @'
-# worker.ps1 (executa como SYSTEM)
-# Troque o comando abaixo pelo real:
+start-sleep 10
 msg * "TESTE"
 '@
 
@@ -357,4 +356,5 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
