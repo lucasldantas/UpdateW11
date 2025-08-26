@@ -15,7 +15,7 @@ $Txt_BtnNow               = 'Executar agora'
 $Txt_BtnDelay1            = 'Adiar 1 hora'
 $Txt_BtnDelay2            = 'Adiar 2 horas'
 
-$t                        = "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"
+$t                        = "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"
 
 $Txt_ConfirmTitle         = 'Confirmação de execução'
 $Txt_ConfirmSubtitle      = 'Chegou a hora agendada. Confirme a execução agora.'
