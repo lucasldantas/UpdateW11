@@ -352,7 +352,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddHours(1)   # para teste: .AddMinutes(2)
+    $runAt=(Get-Date).AddMinutes(2)   # para teste: .AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -374,3 +374,4 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
