@@ -45,8 +45,8 @@ $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $IsoWorkDir  = 'C:\Temp\UpdateW11'
 $IsoUrl      = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
 $IsoPath     = Join-Path $IsoWorkDir 'Win11_24H2_BrazilianPortuguese_x64.iso'
-$IsoMinSize  = 5GB  # 5.368.709.120 bytes
-$IsoDrive    = 'X'  # letra alvo da imagem
+$IsoMinSize  = [UInt64]5368709120  # 5 GB
+$IsoDrive    = 'X'                 # letra alvo da imagem
 # =====================================================
 
 # ---------- Log ----------
@@ -146,10 +146,7 @@ function Dismount-IfMountedX {
         $img = $vol | Get-DiskImage -ErrorAction SilentlyContinue
         if ($img) { Dismount-DiskImage -ImagePath $img.ImagePath -ErrorAction SilentlyContinue }
       } catch {}
-      # como belt-and-suspenders, tenta limpar a letra
-      try {
-        $vol | Set-CimInstance -Arguments @{ DriveLetter = $null } -ErrorAction SilentlyContinue | Out-Null
-      } catch {}
+      try { $vol | Set-CimInstance -Arguments @{ DriveLetter = $null } -ErrorAction SilentlyContinue | Out-Null } catch {}
       Start-Sleep -Seconds 2
     }
   } catch {}
@@ -180,7 +177,6 @@ function Ensure-IsoDownloaded {
       Write-UiLog "BITS falhou: $($_.Exception.Message). Tentando Invoke-WebRequest."
       Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -TimeoutSec 0
     }
-    # valida tamanho
     $final = (Get-Item -LiteralPath $Path).Length
     if ($final -lt $MinBytes) { throw "Download concluído porém tamanho inesperado ($final bytes) < mínimo ($MinBytes)." }
     Write-UiLog "Download OK (${final} bytes)."
@@ -231,85 +227,87 @@ function Get-ActiveConsoleUser {
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
-# --- Conteúdo do worker (executa a atualização) ---
-$DefaultWorkerBody = @"
+# ==================== WORKER VIA TEMPLATE (SEM ESCAPES ERRADOS) ====================
+# Use aspas simples para evitar expansão e preencha valores com -f
+$DefaultWorkerTemplate = @'
 #requires -version 5.1
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-\$IsoWorkDir = '$IsoWorkDir'
-\$IsoUrl     = '$IsoUrl'
-\$IsoPath    = '$IsoPath'
-\$IsoMinSize = [UInt64]$IsoMinSize
-\$IsoDrive   = '$IsoDrive'
+$IsoWorkDir = '{0}'
+$IsoUrl     = '{1}'
+$IsoPath    = '{2}'
+$IsoMinSize = [UInt64]{3}
+$IsoDrive   = '{4}'
 
-function Write-WorkerLog(\$m){
+function Write-WorkerLog($m){
   try {
-    \$root = '$AppRoot'
-    if (-not (Test-Path -LiteralPath \$root)) { New-Item -Path \$root -ItemType Directory -Force | Out-Null }
-    Add-Content -LiteralPath (Join-Path \$root 'worker.log') -Value "[(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] \$m"
+    $root = 'C:\ProgramData\UpdateW11'
+    if (-not (Test-Path -LiteralPath $root)) { New-Item -Path $root -ItemType Directory -Force | Out-Null }
+    Add-Content -LiteralPath (Join-Path $root 'worker.log') -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $m"
   } catch {}
 }
 
 function Ensure-IsoReady {
-  if (-not (Test-Path -LiteralPath \$IsoPath)) { throw "ISO não encontrada em \$IsoPath" }
-  \$len = (Get-Item -LiteralPath \$IsoPath).Length
-  if (\$len -lt \$IsoMinSize) { throw "ISO menor que o mínimo (\$len < \$IsoMinSize)" }
+  if (-not (Test-Path -LiteralPath $IsoPath)) { throw "ISO não encontrada em $IsoPath" }
+  $len = (Get-Item -LiteralPath $IsoPath).Length
+  if ($len -lt $IsoMinSize) { throw "ISO menor que o mínimo ($len < $IsoMinSize)" }
 }
 
 function Mount-IsoX {
   try {
     # desmonta X: se houver
-    \$vol = Get-Volume -DriveLetter \$IsoDrive -ErrorAction SilentlyContinue
-    if (\$vol) {
+    $vol = Get-Volume -DriveLetter $IsoDrive -ErrorAction SilentlyContinue
+    if ($vol) {
       try {
-        \$img = \$vol | Get-DiskImage -ErrorAction SilentlyContinue
-        if (\$img) { Dismount-DiskImage -ImagePath \$img.ImagePath -ErrorAction SilentlyContinue }
+        $img = $vol | Get-DiskImage -ErrorAction SilentlyContinue
+        if ($img) { Dismount-DiskImage -ImagePath $img.ImagePath -ErrorAction SilentlyContinue }
       } catch {}
-      try { \$vol | Set-CimInstance -Arguments @{ DriveLetter = \$null } -ErrorAction SilentlyContinue | Out-Null } catch {}
+      try { $vol | Set-CimInstance -Arguments @{ DriveLetter = $null } -ErrorAction SilentlyContinue | Out-Null } catch {}
       Start-Sleep -Seconds 2
     }
 
-    Mount-DiskImage -ImagePath \$IsoPath -ErrorAction Stop
-    \$volNew = Get-DiskImage -ImagePath \$IsoPath | Get-Volume
-    \$oldDrv = \$volNew.DriveLetter + ':'
-    \$newDrv = \$IsoDrive + ':'
+    Mount-DiskImage -ImagePath $IsoPath -ErrorAction Stop
+    $volNew = Get-DiskImage -ImagePath $IsoPath | Get-Volume
+    $oldDrv = $volNew.DriveLetter + ':'
+    $newDrv = $IsoDrive + ':'
 
     Get-CimInstance -Class Win32_Volume |
-      Where-Object { \$_.DriveLetter -eq \$oldDrv } |
-      Set-CimInstance -Arguments @{ DriveLetter = \$newDrv }
+      Where-Object { $_.DriveLetter -eq $oldDrv } |
+      Set-CimInstance -Arguments @{ DriveLetter = $newDrv }
 
-    Write-WorkerLog ("ISO montada em {0} (antes: {1})." -f \$newDrv, \$oldDrv)
-    return (\$IsoDrive + ':\')
+    Write-WorkerLog ("ISO montada em {0} (antes: {1})." -f $newDrv, $oldDrv)
+    return ($IsoDrive + ':\')
   } catch {
-    Write-WorkerLog "Falha ao montar ISO: \$($_.Exception.Message)"
+    Write-WorkerLog ("Falha ao montar ISO: {0}" -f $_.Exception.Message)
     throw
   }
 }
 
-function Start-Upgrade(\$setupRoot){
-  \$setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs C:\Temp\UpdateW11\logs.log"
-  Write-WorkerLog "Iniciando Setup: `"\$setupRoot\Setup.exe`" \$setupArgs"
-  Start-Process -FilePath (Join-Path \$setupRoot 'Setup.exe') -ArgumentList \$setupArgs -Wait
+function Start-Upgrade($setupRoot){
+  $setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs C:\Temp\UpdateW11\logs.log"
+  Write-WorkerLog ("Iniciando Setup: {0} {1}" -f (Join-Path $setupRoot 'Setup.exe'), $setupArgs)
+  Start-Process -FilePath (Join-Path $setupRoot 'Setup.exe') -ArgumentList $setupArgs -Wait
   Write-WorkerLog "Setup finalizado (fase inicial). Reiniciando..."
 }
 
 try {
   Write-WorkerLog "Worker START"
   Ensure-IsoReady
-  \$root = Mount-IsoX
-  Start-Upgrade -setupRoot \$root
+  $root = Mount-IsoX
+  Start-Upgrade -setupRoot $root
   Start-Sleep -Seconds 10
   Restart-Computer -Force
 } catch {
-  Write-WorkerLog "ERRO: \$($_.Exception.Message)"
-  # Opcionalmente, sinalize ao usuário:
-  try { msg * /time:10 "Falha ao iniciar atualização do Windows: \$($_.Exception.Message)" } catch {}
+  Write-WorkerLog ("ERRO: {0}" -f $_.Exception.Message)
+  try { msg * /time:10 ("Falha ao iniciar atualização do Windows: {0}" -f $_.Exception.Message) } catch {}
   exit 1
 }
-"@
+'@
 
-# --- Sincroniza worker.ps1 (atualiza se mudou) ---
+$DefaultWorkerBody = $DefaultWorkerTemplate -f $IsoWorkDir, $IsoUrl, $IsoPath, $IsoMinSize, $IsoDrive
+
+# --- Grava / atualiza worker.ps1 ---
 function Ensure-WorkerScript {
   $utf8BOM = New-Object System.Text.UTF8Encoding($true)
   $current = ''
@@ -561,7 +559,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddMinutes(2)
+    $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
