@@ -39,19 +39,10 @@ $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $WorkerCMD       = Join-Path $AppRoot 'WorkerBootstrap.cmd'
 $LogPath         = Join-Path $AppRoot 'ui.log'
 
-# CSV de resultados (local)
-$ResultsCsv      = Join-Path $AppRoot 'results.csv'
-
-# GitHub (opcional p/ enviar o CSV)
-$RepoOwner       = 'lucasldantas'
-$RepoName        = 'UpdateW11'
-$RepoBranch      = 'main'
-$RepoCsvPath     = 'results.csv'
-
 # PowerShell 64-bit explícito
 $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
-# Conteúdo do worker: deixa rastro + reboot (exemplo)
+# Conteúdo do worker: deixa rastro + reinicia (altere à vontade)
 $DefaultWorkerBody = @'
 # Worker em SYSTEM — teste visível + reboot
 "Ran at $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
@@ -59,17 +50,17 @@ MSG * TESTE
 '@
 
 # (Opcional) Bootstrap GitHub quando rodando via IEX
-$RepoOwnerUI    = 'lucasldantas'
-$RepoNameUI     = 'UpdateW11'
-$RepoRefUI      = 'main'
-$RepoFilePathUI = 'ui.ps1'
+$RepoOwner    = 'lucasldantas'
+$RepoName     = 'UpdateW11'
+$RepoRef      = 'main'
+$RepoFilePath = 'ui.ps1'
 # =====================================================
 
 # ---------- Log (opcional) ----------
 function Write-UiLog([string]$msg) {
   try {
     $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    Add-Content -LiteralPath $LogPath -Value "[$stamp] $msg" -Encoding utf8
+    Add-Content -LiteralPath $LogPath -Value "[$stamp] $msg"
   } catch {}
 }
 
@@ -83,40 +74,13 @@ try {
   }
 } catch { Write-UiLog "Falha STA: $($_.Exception.Message)" }
 
-# ---------- Utilitários ----------
-function Get-DeviceSerial {
-  try { return (Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop).SerialNumber }
-  catch { return $env:COMPUTERNAME }
-}
-
-function Get-ActiveConsoleUser {
-  try {
-    $expl = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($expl -and $expl.UserName) { return $expl.UserName }
-  } catch {}
-  try {
-    $out = (quser) 2>$null
-    foreach ($line in $out) {
-      if ($line -match '^\s*(\S+)\s+(\S+)\s+(\S+)') {
-        $user=$Matches[1]; $state=$Matches[3]
-        if ($state -match 'Active|Ativa') {
-          if ($env:USERDOMAIN) { return "$env:USERDOMAIN\$user" }
-          else { return "$env:COMPUTERNAME\$user" }
-        }
-      }
-    }
-  } catch {}
-  return [Security.Principal.WindowsIdentity]::GetCurrent().Name
-}
-
-# ---------- Download robusto do GitHub para UI ----------
+# ---------- Download robusto do GitHub ----------
 function Get-UiFromGitHub {
   param([string]$Owner,[string]$Repo,[string]$Path,[string]$Ref)
   $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
   $rawUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref/$Path"
   $headers = @{ 'User-Agent'='ps'; 'Accept'='application/vnd.github+json' }
-  $token = $script:t; if (-not $token) { $token = $env:GITHUB_TOKEN }
-  if ($token) { $headers['Authorization'] = "token $token" }
+  if ($script:t -and $t) { $headers['Authorization'] = "token $t" }
 
   try {
     $resp = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
@@ -126,7 +90,7 @@ function Get-UiFromGitHub {
     $e1=$_.Exception.Message
     try {
       $rawHeaders=@{ 'User-Agent'='ps' }
-      if ($token) { $rawHeaders['Authorization']="token $token" }
+      if ($script:t -and $t) { $rawHeaders['Authorization']="token $t" }
       $resp2 = Invoke-WebRequest -Uri $rawUrl -Headers $rawHeaders -UseBasicParsing -ErrorAction Stop
       return ,([Text.Encoding]::UTF8.GetBytes($resp2.Content))
     } catch { $e2=$_.Exception.Message; throw "Falha baixar UI:`n1) $apiUrl -> $e1`n2) $rawUrl -> $e2" }
@@ -144,7 +108,7 @@ try {
 
 if (-not $RunningFromTarget) {
   try {
-    $bytes = Get-UiFromGitHub -Owner $RepoOwnerUI -Repo $RepoNameUI -Path $RepoFilePathUI -Ref $RepoRefUI
+    $bytes = Get-UiFromGitHub -Owner $RepoOwner -Repo $RepoName -Path $RepoFilePath -Ref $RepoRef
     $text  = [Text.Encoding]::UTF8.GetString($bytes)
     $utf8BOM = New-Object System.Text.UTF8Encoding($true)
     [IO.File]::WriteAllText($TargetPath, $text, $utf8BOM)
@@ -164,78 +128,7 @@ if (-not $RunningFromTarget) {
 # Agora estamos em C:\ProgramData\UpdateW11\ui.ps1
 $ScriptPath = (Resolve-Path $TargetPath).Path
 
-# ---------- GitHub: append no CSV remoto (opcional) ----------
-function Add-ResultToGitHubCsv {
-  param(
-    [string]$Owner,
-    [string]$Repo,
-    [string]$Branch,
-    [string]$Path,
-    [string]$NewLine
-  )
-  try {
-    $token = $script:t; if (-not $token) { $token = $env:GITHUB_TOKEN }
-    if (-not $token) { throw "Token ausente (defina `$t ou env:GITHUB_TOKEN)." }
-
-    $headers = @{ 'User-Agent'='ps'; 'Accept'='application/vnd.github+json'; 'Authorization'="token $token" }
-
-    # 1) Baixa conteúdo atual (raw) e SHA atual (API)
-    $apiGet = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Branch"
-    $resp   = Invoke-RestMethod -Uri $apiGet -Headers $headers -ErrorAction Stop
-    $sha    = $resp.sha
-    $curr   = ''
-    if ($resp.content) {
-      $currBytes = [Convert]::FromBase64String($resp.content)
-      $curr      = [Text.Encoding]::UTF8.GetString($currBytes)
-    }
-
-    # 2) Anexa nova linha (garantindo quebra de linha única no final)
-    if ($curr -and $curr[-1] -ne "`n") { $curr = $curr + "`r`n" }
-    $newContent = $curr + $NewLine + "`r`n"
-
-    # 3) Atualiza via PUT (create/update file)
-    $apiPut = "https://api.github.com/repos/$Owner/$Repo/contents/$Path"
-    $body = @{
-      message = "append results.csv"
-      content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($newContent))
-      branch  = $Branch
-      sha     = $sha
-    } | ConvertTo-Json
-
-    $respPut = Invoke-RestMethod -Method Put -Uri $apiPut -Headers $headers -Body $body -ErrorAction Stop
-    Write-UiLog "GitHub CSV atualizado com sucesso (commit: $($respPut.commit.sha.Substring(0,7)))"
-  } catch {
-    Write-UiLog "Falha ao atualizar CSV no GitHub: $($_.Exception.Message)"
-  }
-}
-
-# ---------- Registro no CSV local + (opcional) GitHub ----------
-function Add-ResultLog {
-  param([ValidateSet('Executar agora','Adiar 1 hora','Adiar 2 horas')] [string]$Acao)
-
-  try {
-    $serial  = (Get-DeviceSerial) -replace '\s+$',''
-    $usuario = (Get-ActiveConsoleUser)
-    $data    = (Get-Date).ToString('dd/MM/yyyy')
-    $hora    = (Get-Date).ToString('HH:mm:ss')
-
-    # Garante CSV local com cabeçalho
-    if (-not (Test-Path -LiteralPath $ResultsCsv)) {
-      'SERIAL;USUARIO;DATA;HORA;EXECUCAO' | Out-File -LiteralPath $ResultsCsv -Encoding utf8
-    }
-
-    $line = '{0};{1};{2};{3};{4}' -f $serial,$usuario,$data,$hora,$Acao
-    Add-Content -LiteralPath $ResultsCsv -Value $line -Encoding utf8
-    Write-UiLog "CSV local registrado: $line"
-
-    # Tenta enviar para GitHub (opcional)
-    Add-ResultToGitHubCsv -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -Path $RepoCsvPath -NewLine $line
-  } catch {
-    Write-UiLog "Falha ao registrar CSV: $($_.Exception.Message)"
-  }
-}
-
-# ---------- Scheduler / Worker ----------
+# ---------- Helpers ----------
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
@@ -246,6 +139,27 @@ function Ensure-SchedulerRunning {
   } catch {}
 }
 function Remove-UiTask { try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {} }
+
+# Usuário ativo da console (não SYSTEM)
+function Get-ActiveConsoleUser {
+  try {
+    $expl = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($expl -and $expl.UserName) { return $expl.UserName }
+  } catch {}
+  try {
+    $out = (quser) 2>$null
+    foreach ($line in $out) {
+      if ($line -match '^\s*(\S+)\s+(\S+)\s+(\S+)') {
+        $user=$Matches[1]; $state=$Matches[3]
+        if ($state -match 'Active|Ativa') {
+          if ($env:USERDOMAIN) { return "$env:USERDOMAIN\$user" }
+          else { return "$env:COMPUTERNAME\$user" }
+        }
+      }
+    }
+  } catch {}
+  return [Security.Principal.WindowsIdentity]::GetCurrent().Name
+}
 
 # --- Sincroniza worker.ps1 (atualiza se mudou) ---
 function Ensure-WorkerScript {
@@ -279,13 +193,14 @@ function Ensure-WorkerBootstrapCmd {
   [IO.File]::WriteAllText($WorkerCMD, $cmd, (New-Object System.Text.UTF8Encoding($true)))
 }
 
+# --- Valida a existência dos artefatos; recria se necessário ---
 function Ensure-WorkerArtifacts {
   if (-not (Test-Path -LiteralPath $AppRoot)) {
     New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
   }
   Ensure-WorkerScript
   Ensure-WorkerBootstrapCmd
-
+  # Verificações e logs
   $missing = @()
   if (-not (Test-Path -LiteralPath $WorkerPath)) { $missing += $WorkerPath }
   if (-not (Test-Path -LiteralPath $WorkerCMD))  { $missing += $WorkerCMD }
@@ -302,10 +217,12 @@ function Ensure-WorkerArtifacts {
   } catch {}
 }
 
+# --- Cria/REcria a tarefa do Worker apontando para o .CMD ---
 function Ensure-WorkerTask {
   Ensure-WorkerArtifacts
 
   $trValue = '"' + $WorkerCMD + '"'
+  # elimina e recria sempre (evita lixo de versões antigas)
   try { schtasks /Delete /TN $WorkerTaskName /F | Out-Null } catch {}
 
   $argsCreate = @('/Create','/TN',$WorkerTaskName,'/TR',$trValue,'/SC','ONCE','/SD','01/01/2099','/ST','00:00','/RL','HIGHEST','/RU','SYSTEM','/F')
@@ -317,6 +234,7 @@ function Ensure-WorkerTask {
     throw ("Falha ao criar Worker. Saída:`n{0}" -f ($outCreate -join [Environment]::NewLine))
   }
 
+  # Confirma o /TR gravado
   $outQuery = schtasks /Query /TN $WorkerTaskName /V /FO LIST 2>&1
   Write-UiLog ("Query Worker ->`n{0}" -f ($outQuery -join [Environment]::NewLine))
 }
@@ -333,6 +251,7 @@ function Format-DateVariants([datetime]$when) {
   return @($ddMMyyyy, $MMddyyyy)
 }
 
+# Cria a tarefa de REPROMPT (UI do usuário, sem console do host)
 function New-RePromptTask {
   param([datetime]$when)
 
@@ -343,6 +262,7 @@ function New-RePromptTask {
   $ru = Get-ActiveConsoleUser
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
+  # Ajusta horário pro schtasks aceitar
   $now    = Get-Date
   $target = Round-ToSchtasksMinute $when
   if ($target -le $now) { $target = Round-ToSchtasksMinute($now.AddMinutes(2)) }
@@ -372,6 +292,7 @@ function New-RePromptTask {
   }
 }
 
+# -------- Executar agora: prepara Worker e dispara --------
 function Run-Now {
   try {
     Ensure-WorkerTask
@@ -495,15 +416,14 @@ function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closin
 
 # -------- Eventos --------
 $BtnNow.Add_Click({
-  try { Add-ResultLog -Acao 'Executar agora' } catch {}
   Allow-Close $window; $window.Close(); Run-Now
 })
 
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    Add-ResultLog -Acao 'Adiar 1 hora'
-    $runAt=(Get-Date).AddMinutes(2)
+    # para teste rápido, use .AddMinutes(2)
+    $runAt=(Get-Date).AddMinutes(1)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -515,7 +435,6 @@ $BtnDelay1.Add_Click({
 $BtnDelay2.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    Add-ResultLog -Acao 'Adiar 2 horas'
     $runAt=(Get-Date).AddHours(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
@@ -526,3 +445,6 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
+
+
