@@ -39,13 +39,13 @@ $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $WorkerCMD       = Join-Path $AppRoot 'WorkerBootstrap.cmd'
 $LogPath         = Join-Path $AppRoot 'ui.log'
 
-# Use caminho EXPLÍCITO 64-bit do PowerShell
+# PowerShell 64-bit explícito
 $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
-# Conteúdo do worker a executar como SYSTEM (edite à vontade)
+# Conteúdo do worker: deixa rastro e reinicia (mude à vontade)
 $DefaultWorkerBody = @'
-# Executa exatamente o que você quer (SYSTEM)
-# Exemplo: reiniciar
+# Worker em SYSTEM — teste visível + reboot
+"Ran at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
 Restart-Computer -Force
 '@
 
@@ -173,7 +173,7 @@ function Ensure-WorkerScript {
   }
 }
 
-# --- Cria/atualiza Bootstrap .cmd que chama o PowerShell 64-bit e loga ---
+# --- Bootstrap .cmd que chama o PowerShell 64-bit e loga tudo ---
 function Ensure-WorkerBootstrapCmd {
   $cmd = @(
     '@echo off',
@@ -184,9 +184,8 @@ function Ensure-WorkerBootstrapCmd {
     'set PSEXEPATH=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
     'if not exist "%PSEXEPATH%" set PSEXEPATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
     'echo [%date% %time%] Using "%PSEXEPATH%" >> "%LOG%"',
-    'echo [%date% %time%] Running worker.ps1 >> "%LOG%"',
-    '"%PSEXEPATH%" -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%APPROOT%\worker.ps1"',
-    'echo [%date% %time%] PS exitcode=%errorlevel% >> "%LOG%"',
+    '"%PSEXEPATH%" -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%APPROOT%\worker.ps1" >> "%LOG%" 2>&1',
+    'echo [%date% %time%] DONE code=%errorlevel% >> "%LOG%"',
     'endlocal',
     'exit /b %errorlevel%'
   ) -join "`r`n"
@@ -208,6 +207,18 @@ function Ensure-WorkerTask {
   }
 }
 
+# ---------- Utilidades para agendar no minuto correto ----------
+function Round-ToSchtasksMinute([datetime]$dt) {
+  $rounded = $dt.AddSeconds(-$dt.Second).AddMilliseconds(-$dt.Millisecond)
+  if ($dt -gt $rounded) { $rounded = $rounded.AddMinutes(1) }
+  return $rounded
+}
+function Format-DateVariants([datetime]$when) {
+  $ddMMyyyy = $when.ToString('dd/MM/yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+  $MMddyyyy = $when.ToString('MM/dd/yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+  return @($ddMMyyyy, $MMddyyyy)
+}
+
 # Cria a tarefa de REPROMPT (UI do usuário, sem console do host)
 function New-RePromptTask {
   param([datetime]$when)
@@ -219,11 +230,34 @@ function New-RePromptTask {
   $ru = Get-ActiveConsoleUser
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
-  $sd = $when.ToString('dd/MM/yyyy'); $st = $when.ToString('HH:mm')
+  # Ajusta horário pro schtasks aceitar
+  $now    = Get-Date
+  $target = Round-ToSchtasksMinute $when
+  if ($target -le $now) { $target = Round-ToSchtasksMinute($now.AddMinutes(2)) }
+
+  $dates = Format-DateVariants $target
+  $st    = $target.ToString('HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+
   $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {}
-  schtasks /Create /TN $TaskNameUI /TR $trValue /SC ONCE /SD $sd /ST $st /RL HIGHEST /RU $ru /IT /F | Out-Null
+
+  $created = $false
+  foreach ($sd in $dates) {
+    $args   = @('/Create','/TN',$TaskNameUI,'/TR',$trValue,'/SC','ONCE','/SD',$sd,'/ST',$st,'/RL','HIGHEST','/RU',$ru,'/IT','/F')
+    $output = schtasks @args 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      $created = $true
+      try { Add-Content -LiteralPath $LogPath -Value ("[{0}] Tarefa UI criada: SD={1} ST={2} RU={3}" -f (Get-Date), $sd, $st, $ru) } catch {}
+      break
+    } else {
+      try { Add-Content -LiteralPath $LogPath -Value ("[{0}] Falha criar UI SD={1}: {2}" -f (Get-Date), $sd, ($output -join ' ')) } catch {}
+    }
+  }
+
+  if (-not $created) {
+    throw "Falha ao criar a tarefa. Saída do schtasks:`n$($output -join [Environment]::NewLine)"
+  }
 }
 
 # -------- Executar agora: dispara o worker (SYSTEM) --------
@@ -231,7 +265,7 @@ function Run-Now {
   try {
     Ensure-WorkerTask
     $out = schtasks /Run /TN $WorkerTaskName 2>&1
-    Write-UiLog ("schtasks /Run -> {0}" -f $out)
+    Write-UiLog ("schtasks /Run -> {0}" -f ($out -join ' '))
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("$Txt_ErrorRunPrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
@@ -352,7 +386,8 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddMinutes(5)   # para teste: .AddMinutes(2)
+    # para teste rápido, use .AddMinutes(2)
+    $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -374,5 +409,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
-
