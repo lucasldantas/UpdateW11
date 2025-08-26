@@ -227,18 +227,18 @@ function Get-ActiveConsoleUser {
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
-# ==================== WORKER VIA TEMPLATE (SEM ESCAPES ERRADOS) ====================
-# Use aspas simples para evitar expansão e preencha valores com -f
-$DefaultWorkerTemplate = @'
+# ==================== WORKER (robusto, sem escapes) ====================
+# Template literal com marcadores; vamos preencher com .Replace()
+$WorkerTemplate = @'
 #requires -version 5.1
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-$IsoWorkDir = '{0}'
-$IsoUrl     = '{1}'
-$IsoPath    = '{2}'
-$IsoMinSize = [UInt64]{3}
-$IsoDrive   = '{4}'
+$IsoWorkDir = '__ISOWORKDIR__'
+$IsoUrl     = '__ISOURL__'
+$IsoPath    = '__ISOPATH__'
+$IsoMinSize = [UInt64]__ISOMINSIZE__
+$IsoDrive   = '__ISODRIVE__'
 
 function Write-WorkerLog($m){
   try {
@@ -256,7 +256,7 @@ function Ensure-IsoReady {
 
 function Mount-IsoX {
   try {
-    # desmonta X: se houver
+    # desmonta a letra alvo se já existir
     $vol = Get-Volume -DriveLetter $IsoDrive -ErrorAction SilentlyContinue
     if ($vol) {
       try {
@@ -302,10 +302,44 @@ try {
   Write-WorkerLog ("ERRO: {0}" -f $_.Exception.Message)
   try { msg * /time:10 ("Falha ao iniciar atualização do Windows: {0}" -f $_.Exception.Message) } catch {}
   exit 1
+} finally {
+  # Opcional: desmontar ISO para não deixar X: preso em caso de erro
+  try {
+    $img = Get-DiskImage -ImagePath '__ISOPATH__' -ErrorAction SilentlyContinue
+    if ($img) { Dismount-DiskImage -ImagePath $img.ImagePath -ErrorAction SilentlyContinue }
+  } catch {}
 }
 '@
 
-$DefaultWorkerBody = $DefaultWorkerTemplate -f $IsoWorkDir, $IsoUrl, $IsoPath, $IsoMinSize, $IsoDrive
+# Constrói o corpo substituindo os marcadores literalmente (sem regex)
+$DefaultWorkerBody =
+  $WorkerTemplate.
+    Replace('__ISOWORKDIR__', $IsoWorkDir).
+    Replace('__ISOURL__',     $IsoUrl).
+    Replace('__ISOPATH__',    $IsoPath).
+    Replace('__ISOMINSIZE__', [string]$IsoMinSize).
+    Replace('__ISODRIVE__',   $IsoDrive)
+
+# --- Grava / atualiza worker.ps1 com verificação robusta ---
+function Ensure-WorkerScript {
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  try {
+    [IO.File]::WriteAllText($WorkerPath, $DefaultWorkerBody, $utf8NoBom)
+  } catch {
+    # fallback
+    $DefaultWorkerBody | Out-File -LiteralPath $WorkerPath -Encoding utf8 -Force
+  }
+
+  # Verifica tamanho > 0
+  try {
+    $info = Get-Item -LiteralPath $WorkerPath -ErrorAction Stop
+    if ($info.Length -le 0) { throw "worker.ps1 ficou com tamanho 0." }
+    Write-UiLog ("worker.ps1 gravado: {0} bytes" -f $info.Length)
+  } catch {
+    Write-UiLog ("FALHA ao validar worker.ps1: {0}" -f $_.Exception.Message)
+    throw
+  }
+}
 
 # --- Grava / atualiza worker.ps1 ---
 function Ensure-WorkerScript {
