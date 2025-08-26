@@ -41,8 +41,7 @@ $LogPath         = Join-Path $AppRoot 'ui.log'
 
 # Conteúdo padrão do worker (será criado se não existir; troque no arquivo)
 $DefaultWorkerBody = @'
-start-sleep 10
-msg * "TESTE"
+Restart-Computer -Force
 '@
 
 # Repo (quando executando via IEX/GitHub)
@@ -356,5 +355,6 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
 
