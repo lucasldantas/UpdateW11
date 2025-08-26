@@ -3,7 +3,7 @@ param([switch]$RePrompt)
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
-# ==================== TEXTOS / RÓTULOS (customizáveis) ====================
+# ==================== TEXTOS / RÓTULOS ====================
 $Txt_WindowTitle          = 'Agendar Execução'
 $Txt_HeaderTitle          = 'Atualização Obrigatória'
 $Txt_HeaderSubtitle       = 'Você pode executar agora ou adiar por até 2 horas.'
@@ -28,24 +28,28 @@ $Txt_ErrorRunPrefix       = 'Falha ao executar:'
 $Txt_ErrorNoPS            = "powershell.exe não encontrado em '{0}'."
 $Txt_ErrorNoScript        = "Script não encontrado em '{0}'."
 $Txt_ErrorNoRU            = 'Não foi possível resolver o usuário atual para /RU.'
-# ==========================================================================
+# ==========================================================
 
 # ==================== CONFIG GERAL ====================
 $AppRoot         = 'C:\ProgramData\UpdateW11'
 $TargetPath      = Join-Path $AppRoot 'ui.ps1'
-$TaskNameUI      = 'UpdateW11-UI'              # tarefa da UI (usuário)
-$WorkerTaskName  = 'UpdateW11-Worker'          # tarefa do worker (SYSTEM)
+$TaskNameUI      = 'UpdateW11-UI'               # tarefa da UI (usuário)
+$WorkerTaskName  = 'UpdateW11-Worker'           # tarefa do worker (SYSTEM)
 $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
-$PsExeFull       = Join-Path $PSHOME 'powershell.exe'
+$WorkerCMD       = Join-Path $AppRoot 'WorkerBootstrap.cmd'
 $LogPath         = Join-Path $AppRoot 'ui.log'
 
-# Conteúdo padrão do worker (ATUALIZA automaticamente se mudar aqui)
-# -> Troque esta linha pelo comando que quiser executar como SYSTEM.
+# Use caminho EXPLÍCITO 64-bit do PowerShell
+$PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+
+# Conteúdo do worker a executar como SYSTEM (edite à vontade)
 $DefaultWorkerBody = @'
+# Executa exatamente o que você quer (SYSTEM)
+# Exemplo: reiniciar
 Restart-Computer -Force
 '@
 
-# (Opcional) Repositório para bootstrap quando executado via IEX/GitHub
+# (Opcional) Bootstrap GitHub quando rodando via IEX
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
 $RepoRef      = 'main'
@@ -60,7 +64,7 @@ function Write-UiLog([string]$msg) {
   } catch {}
 }
 
-# ---------- Garantir STA (WPF precisa) ----------
+# ---------- Garantir STA ----------
 try {
   if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
     $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
@@ -157,7 +161,7 @@ function Get-ActiveConsoleUser {
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
-# Garante o worker SYSTEM + arquivo worker.ps1 (ATUALIZA se o conteúdo mudar)
+# --- Sincroniza worker.ps1 (atualiza se mudou) ---
 function Ensure-WorkerScript {
   $utf8BOM = New-Object System.Text.UTF8Encoding($true)
   $current = ''
@@ -169,10 +173,33 @@ function Ensure-WorkerScript {
   }
 }
 
+# --- Cria/atualiza Bootstrap .cmd que chama o PowerShell 64-bit e loga ---
+function Ensure-WorkerBootstrapCmd {
+  $cmd = @(
+    '@echo off',
+    'setlocal',
+    'set APPROOT=C:\ProgramData\UpdateW11',
+    'set LOG=%APPROOT%\worker-bootstrap.log',
+    'echo [%date% %time%] Bootstrap START >> "%LOG%"',
+    'set PSEXEPATH=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+    'if not exist "%PSEXEPATH%" set PSEXEPATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
+    'echo [%date% %time%] Using "%PSEXEPATH%" >> "%LOG%"',
+    'echo [%date% %time%] Running worker.ps1 >> "%LOG%"',
+    '"%PSEXEPATH%" -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%APPROOT%\worker.ps1"',
+    'echo [%date% %time%] PS exitcode=%errorlevel% >> "%LOG%"',
+    'endlocal',
+    'exit /b %errorlevel%'
+  ) -join "`r`n"
+  [IO.File]::WriteAllText($WorkerCMD, $cmd, (New-Object System.Text.UTF8Encoding($true)))
+}
+
 function Ensure-WorkerTask {
   Ensure-WorkerScript
-  # Worker sem console
-  $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $WorkerPath + '"'
+  Ensure-WorkerBootstrapCmd
+
+  # Agendar o .CMD (não o powershell diretamente)
+  $trValue = '"' + $WorkerCMD + '"'
+
   $exists = (schtasks /Query /TN $WorkerTaskName 2>$null)
   if (-not $?) {
     schtasks /Create /TN $WorkerTaskName /TR $trValue /SC ONCE /SD 01/01/2099 /ST 00:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
@@ -181,7 +208,7 @@ function Ensure-WorkerTask {
   }
 }
 
-# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível mas sem console do host)
+# Cria a tarefa de REPROMPT (UI do usuário, sem console do host)
 function New-RePromptTask {
   param([datetime]$when)
 
@@ -193,19 +220,18 @@ function New-RePromptTask {
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
   $sd = $when.ToString('dd/MM/yyyy'); $st = $when.ToString('HH:mm')
-  # UI sem console (a UI WPF aparece normalmente)
   $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {}
-
   schtasks /Create /TN $TaskNameUI /TR $trValue /SC ONCE /SD $sd /ST $st /RL HIGHEST /RU $ru /IT /F | Out-Null
 }
 
-# -------- Executar agora: dispara o worker SYSTEM --------
+# -------- Executar agora: dispara o worker (SYSTEM) --------
 function Run-Now {
   try {
     Ensure-WorkerTask
-    schtasks /Run /TN $WorkerTaskName | Out-Null
+    $out = schtasks /Run /TN $WorkerTaskName 2>&1
+    Write-UiLog ("schtasks /Run -> {0}" -f $out)
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("$Txt_ErrorRunPrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
@@ -279,21 +305,15 @@ $reader  = New-Object System.Xml.XmlNodeReader $xaml
 $window  = [Windows.Markup.XamlReader]::Load($reader)
 if (-not $window) { throw "Falha ao carregar a UI a partir do XAML." }
 
-# Garantir visibilidade e foco (PS 5.1: Add_Loaded)
+# Garantir visibilidade e foco
 $window.Topmost = $true
 $window.Add_Loaded({
   try {
     $this.Activate()      | Out-Null
     $this.BringIntoView() | Out-Null
-
-    # segunda tentativa após 150ms
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(150)
-    $timer.Add_Tick({
-      param($s,$e)
-      try { $this.Activate() | Out-Null } catch {}
-      $s.Stop()
-    })
+    $timer.Add_Tick({ param($s,$e) try { $this.Activate() | Out-Null } catch {} ; $s.Stop() })
     $timer.Start()
   } catch {}
 })
@@ -332,8 +352,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    # para teste rápido, mude para .AddMinutes(2)
-    $runAt=(Get-Date).AddMinutes(2)
+    $runAt=(Get-Date).AddHours(1)   # para teste: .AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
