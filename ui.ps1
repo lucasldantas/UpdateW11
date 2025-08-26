@@ -39,16 +39,17 @@ $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $PsExeFull       = Join-Path $PSHOME 'powershell.exe'
 $LogPath         = Join-Path $AppRoot 'ui.log'
 
-# Conteúdo padrão do worker (será criado se não existir; troque no arquivo)
+# Conteúdo padrão do worker (ATUALIZA automaticamente se mudar aqui)
+# -> Troque esta linha pelo comando que quiser executar como SYSTEM.
 $DefaultWorkerBody = @'
 Restart-Computer -Force
 '@
 
-# Repo (quando executando via IEX/GitHub)
+# (Opcional) Repositório para bootstrap quando executado via IEX/GitHub
 $RepoOwner    = 'lucasldantas'
 $RepoName     = 'UpdateW11'
-$RepoRef      = 'main'         # branch
-$RepoFilePath = 'ui.ps1'       # caminho do arquivo no repo
+$RepoRef      = 'main'
+$RepoFilePath = 'ui.ps1'
 # =====================================================
 
 # ---------- Log (opcional) ----------
@@ -94,8 +95,6 @@ function Get-UiFromGitHub {
 
 # ---------- Bootstrap local ----------
 if (-not (Test-Path -LiteralPath $AppRoot)) { New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null }
-
-# $SelfPath para PS 5.1 (sem ??)
 if ($PSCommandPath) { $SelfPath = $PSCommandPath } else { $SelfPath = $MyInvocation.MyCommand.Path }
 
 $RunningFromTarget = $false
@@ -126,10 +125,6 @@ if (-not $RunningFromTarget) {
 $ScriptPath = (Resolve-Path $TargetPath).Path
 
 # ---------- Helpers ----------
-function Test-IsAdmin {
-  $id=[Security.Principal.WindowsIdentity]::GetCurrent()
-  (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
@@ -162,16 +157,21 @@ function Get-ActiveConsoleUser {
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
-# Garante o worker SYSTEM + arquivo worker.ps1
+# Garante o worker SYSTEM + arquivo worker.ps1 (ATUALIZA se o conteúdo mudar)
 function Ensure-WorkerScript {
-  if (-not (Test-Path -LiteralPath $WorkerPath)) {
-    $utf8BOM = New-Object System.Text.UTF8Encoding($true)
+  $utf8BOM = New-Object System.Text.UTF8Encoding($true)
+  $current = ''
+  if (Test-Path -LiteralPath $WorkerPath) {
+    try { $current = Get-Content -LiteralPath $WorkerPath -Raw -ErrorAction Stop } catch { $current = '' }
+  }
+  if ($current -ne $DefaultWorkerBody) {
     [IO.File]::WriteAllText($WorkerPath, $DefaultWorkerBody, $utf8BOM)
   }
 }
+
 function Ensure-WorkerTask {
   Ensure-WorkerScript
-  # >>> Worker sem console
+  # Worker sem console
   $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $WorkerPath + '"'
   $exists = (schtasks /Query /TN $WorkerTaskName 2>$null)
   if (-not $?) {
@@ -181,7 +181,7 @@ function Ensure-WorkerTask {
   }
 }
 
-# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível mas sem console)
+# Cria a tarefa de REPROMPT (UI, usuário logado, interativa, visível mas sem console do host)
 function New-RePromptTask {
   param([datetime]$when)
 
@@ -193,7 +193,7 @@ function New-RePromptTask {
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
   $sd = $when.ToString('dd/MM/yyyy'); $st = $when.ToString('HH:mm')
-  # >>> UI sem console (a UI própria é WPF e aparecerá normalmente)
+  # UI sem console (a UI WPF aparece normalmente)
   $trValue = '"' + $PsExeFull + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $ScriptPath + '" -RePrompt'
 
   try { schtasks /Delete /TN $TaskNameUI /F | Out-Null } catch {}
@@ -332,7 +332,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    # para teste rápido use .AddMinutes(2)
+    # para teste rápido, mude para .AddMinutes(2)
     $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
@@ -355,6 +355,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
-
-
