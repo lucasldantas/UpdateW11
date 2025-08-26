@@ -2,6 +2,7 @@
 param([switch]$RePrompt)
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 # ==================== TEXTOS / RÓTULOS ====================
 $Txt_WindowTitle          = 'Agendar Execução'
@@ -38,27 +39,20 @@ $WorkerTaskName  = 'UpdateW11-Worker'           # tarefa do worker (SYSTEM)
 $WorkerPath      = Join-Path $AppRoot 'worker.ps1'
 $WorkerCMD       = Join-Path $AppRoot 'WorkerBootstrap.cmd'
 $LogPath         = Join-Path $AppRoot 'ui.log'
-
-# PowerShell 64-bit explícito
 $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
-# Conteúdo do worker: deixa rastro + reinicia (altere à vontade)
-$DefaultWorkerBody = @'
-# Worker em SYSTEM — teste visível + reboot
-"Ran at $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
-MSG * TESTE
-'@
-
-# (Opcional) Bootstrap GitHub quando rodando via IEX
-$RepoOwner    = 'lucasldantas'
-$RepoName     = 'UpdateW11'
-$RepoRef      = 'main'
-$RepoFilePath = 'ui.ps1'
+# ---- Pré-download/ISO (usado no pré-popup E pelo worker) ----
+$IsoWorkDir  = 'C:\Temp\UpdateW11'
+$IsoUrl      = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
+$IsoPath     = Join-Path $IsoWorkDir 'Win11_24H2_BrazilianPortuguese_x64.iso'
+$IsoMinSize  = 5GB  # 5.368.709.120 bytes
+$IsoDrive    = 'X'  # letra alvo da imagem
 # =====================================================
 
-# ---------- Log (opcional) ----------
+# ---------- Log ----------
 function Write-UiLog([string]$msg) {
   try {
+    if (-not (Test-Path -LiteralPath $AppRoot)) { New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null }
     $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     Add-Content -LiteralPath $LogPath -Value "[$stamp] $msg"
   } catch {}
@@ -74,7 +68,11 @@ try {
   }
 } catch { Write-UiLog "Falha STA: $($_.Exception.Message)" }
 
-# ---------- Download robusto do GitHub ----------
+# ---------- Download robusto do GitHub (opcional) ----------
+$RepoOwner    = 'lucasldantas'
+$RepoName     = 'UpdateW11'
+$RepoRef      = 'main'
+$RepoFilePath = 'ui.ps1'
 function Get-UiFromGitHub {
   param([string]$Owner,[string]$Repo,[string]$Path,[string]$Ref)
   $apiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/$Path?ref=$Ref"
@@ -128,7 +126,79 @@ if (-not $RunningFromTarget) {
 # Agora estamos em C:\ProgramData\UpdateW11\ui.ps1
 $ScriptPath = (Resolve-Path $TargetPath).Path
 
-# ---------- Helpers ----------
+# ==================== PRÉ-POPUP: checagem + download ISO ====================
+function Test-Build19045 {
+  try {
+    $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $buildStr = $cv.CurrentBuild
+    if (-not $buildStr) { $buildStr = $cv.CurrentBuildNumber }
+    $build = [int]$buildStr
+    return ($build -eq 19045),$build
+  } catch { return $false,$null }
+}
+
+function Dismount-IfMountedX {
+  try {
+    # Desmonta especificamente o que estiver em X:, se houver
+    $vol = Get-Volume -DriveLetter $IsoDrive -ErrorAction SilentlyContinue
+    if ($vol) {
+      try {
+        $img = $vol | Get-DiskImage -ErrorAction SilentlyContinue
+        if ($img) { Dismount-DiskImage -ImagePath $img.ImagePath -ErrorAction SilentlyContinue }
+      } catch {}
+      # como belt-and-suspenders, tenta limpar a letra
+      try {
+        $vol | Set-CimInstance -Arguments @{ DriveLetter = $null } -ErrorAction SilentlyContinue | Out-Null
+      } catch {}
+      Start-Sleep -Seconds 2
+    }
+  } catch {}
+}
+
+function Ensure-IsoDownloaded {
+  param([string]$Url,[string]$Path,[UInt64]$MinBytes)
+
+  if (-not (Test-Path -LiteralPath (Split-Path -Parent $Path))) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+  }
+
+  $downloadNeeded = $true
+  if (Test-Path -LiteralPath $Path) {
+    try {
+      $sz = (Get-Item -LiteralPath $Path).Length
+      if ($sz -ge $MinBytes) { $downloadNeeded = $false; Write-UiLog "ISO já presente (${sz} bytes) — pulando download." }
+      else { Write-UiLog "ISO presente porém menor que mínimo (${sz} < $MinBytes). Rebaixando..." }
+    } catch {}
+  }
+
+  if ($downloadNeeded) {
+    Write-UiLog "Baixando ISO de $Url para $Path ..."
+    try {
+      Import-Module BitsTransfer -ErrorAction SilentlyContinue | Out-Null
+      Start-BitsTransfer -Source $Url -Destination $Path -RetryInterval 60 -RetryTimeout 1800
+    } catch {
+      Write-UiLog "BITS falhou: $($_.Exception.Message). Tentando Invoke-WebRequest."
+      Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -TimeoutSec 0
+    }
+    # valida tamanho
+    $final = (Get-Item -LiteralPath $Path).Length
+    if ($final -lt $MinBytes) { throw "Download concluído porém tamanho inesperado ($final bytes) < mínimo ($MinBytes)." }
+    Write-UiLog "Download OK (${final} bytes)."
+  }
+}
+
+# Executa pré-popup (oculto ao usuário)
+$ok,$foundBuild = Test-Build19045
+if (-not $ok) {
+  try { msg * /time:10 "Windows 10 incompatível (build $foundBuild). Requer 19045." } catch {}
+  Write-UiLog "Build incompatível: $foundBuild. Abortando."
+  return
+}
+Write-UiLog "Build validada: $foundBuild (OK)."
+Dismount-IfMountedX
+try { Ensure-IsoDownloaded -Url $IsoUrl -Path $IsoPath -MinBytes $IsoMinSize } catch { Write-UiLog "Falha no download ISO: $($_.Exception.Message)"; return }
+
+# ==================== HELPERS PÓS-BOOTSTRAP ====================
 function Ensure-SchedulerRunning {
   try {
     $svc = Get-Service -Name 'Schedule' -ErrorAction Stop
@@ -161,13 +231,89 @@ function Get-ActiveConsoleUser {
   return [Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
+# --- Conteúdo do worker (executa a atualização) ---
+$DefaultWorkerBody = @"
+#requires -version 5.1
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+\$IsoWorkDir = '$IsoWorkDir'
+\$IsoUrl     = '$IsoUrl'
+\$IsoPath    = '$IsoPath'
+\$IsoMinSize = [UInt64]$IsoMinSize
+\$IsoDrive   = '$IsoDrive'
+
+function Write-WorkerLog(\$m){
+  try {
+    \$root = '$AppRoot'
+    if (-not (Test-Path -LiteralPath \$root)) { New-Item -Path \$root -ItemType Directory -Force | Out-Null }
+    Add-Content -LiteralPath (Join-Path \$root 'worker.log') -Value "[(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] \$m"
+  } catch {}
+}
+
+function Ensure-IsoReady {
+  if (-not (Test-Path -LiteralPath \$IsoPath)) { throw "ISO não encontrada em \$IsoPath" }
+  \$len = (Get-Item -LiteralPath \$IsoPath).Length
+  if (\$len -lt \$IsoMinSize) { throw "ISO menor que o mínimo (\$len < \$IsoMinSize)" }
+}
+
+function Mount-IsoX {
+  try {
+    # desmonta X: se houver
+    \$vol = Get-Volume -DriveLetter \$IsoDrive -ErrorAction SilentlyContinue
+    if (\$vol) {
+      try {
+        \$img = \$vol | Get-DiskImage -ErrorAction SilentlyContinue
+        if (\$img) { Dismount-DiskImage -ImagePath \$img.ImagePath -ErrorAction SilentlyContinue }
+      } catch {}
+      try { \$vol | Set-CimInstance -Arguments @{ DriveLetter = \$null } -ErrorAction SilentlyContinue | Out-Null } catch {}
+      Start-Sleep -Seconds 2
+    }
+
+    Mount-DiskImage -ImagePath \$IsoPath -ErrorAction Stop
+    \$volNew = Get-DiskImage -ImagePath \$IsoPath | Get-Volume
+    \$oldDrv = \$volNew.DriveLetter + ':'
+    \$newDrv = "\$IsoDrive:"
+
+    Get-CimInstance -Class Win32_Volume |
+      Where-Object { \$_.DriveLetter -eq \$oldDrv } |
+      Set-CimInstance -Arguments @{ DriveLetter = \$newDrv }
+
+    Write-WorkerLog "ISO montada em \$newDrv (antes: \$oldDrv)."
+    return "\$IsoDrive:\"
+  } catch {
+    Write-WorkerLog "Falha ao montar ISO: \$($_.Exception.Message)"
+    throw
+  }
+}
+
+function Start-Upgrade(\$setupRoot){
+  \$setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs C:\Temp\UpdateW11\logs.log"
+  Write-WorkerLog "Iniciando Setup: `"\$setupRoot\Setup.exe`" \$setupArgs"
+  Start-Process -FilePath (Join-Path \$setupRoot 'Setup.exe') -ArgumentList \$setupArgs -Wait
+  Write-WorkerLog "Setup finalizado (fase inicial). Reiniciando..."
+}
+
+try {
+  Write-WorkerLog "Worker START"
+  Ensure-IsoReady
+  \$root = Mount-IsoX
+  Start-Upgrade -setupRoot \$root
+  Start-Sleep -Seconds 10
+  Restart-Computer -Force
+} catch {
+  Write-WorkerLog "ERRO: \$($_.Exception.Message)"
+  # Opcionalmente, sinalize ao usuário:
+  try { msg * /time:10 "Falha ao iniciar atualização do Windows: \$($_.Exception.Message)" } catch {}
+  exit 1
+}
+"@
+
 # --- Sincroniza worker.ps1 (atualiza se mudou) ---
 function Ensure-WorkerScript {
   $utf8BOM = New-Object System.Text.UTF8Encoding($true)
   $current = ''
-  if (Test-Path -LiteralPath $WorkerPath) {
-    try { $current = Get-Content -LiteralPath $WorkerPath -Raw -ErrorAction Stop } catch { $current = '' }
-  }
+  if (Test-Path -LiteralPath $WorkerPath) { try { $current = Get-Content -LiteralPath $WorkerPath -Raw -ErrorAction Stop } catch {} }
   if ($current -ne $DefaultWorkerBody) {
     [IO.File]::WriteAllText($WorkerPath, $DefaultWorkerBody, $utf8BOM)
   }
@@ -200,7 +346,6 @@ function Ensure-WorkerArtifacts {
   }
   Ensure-WorkerScript
   Ensure-WorkerBootstrapCmd
-  # Verificações e logs
   $missing = @()
   if (-not (Test-Path -LiteralPath $WorkerPath)) { $missing += $WorkerPath }
   if (-not (Test-Path -LiteralPath $WorkerCMD))  { $missing += $WorkerCMD }
@@ -209,7 +354,6 @@ function Ensure-WorkerArtifacts {
     Write-UiLog $msg
     throw $msg
   }
-
   try {
     $wp = Get-Item -LiteralPath $WorkerPath
     $wc = Get-Item -LiteralPath $WorkerCMD
@@ -222,7 +366,6 @@ function Ensure-WorkerTask {
   Ensure-WorkerArtifacts
 
   $trValue = '"' + $WorkerCMD + '"'
-  # elimina e recria sempre (evita lixo de versões antigas)
   try { schtasks /Delete /TN $WorkerTaskName /F | Out-Null } catch {}
 
   $argsCreate = @('/Create','/TN',$WorkerTaskName,'/TR',$trValue,'/SC','ONCE','/SD','01/01/2099','/ST','00:00','/RL','HIGHEST','/RU','SYSTEM','/F')
@@ -234,7 +377,6 @@ function Ensure-WorkerTask {
     throw ("Falha ao criar Worker. Saída:`n{0}" -f ($outCreate -join [Environment]::NewLine))
   }
 
-  # Confirma o /TR gravado
   $outQuery = schtasks /Query /TN $WorkerTaskName /V /FO LIST 2>&1
   Write-UiLog ("Query Worker ->`n{0}" -f ($outQuery -join [Environment]::NewLine))
 }
@@ -262,7 +404,6 @@ function New-RePromptTask {
   $ru = Get-ActiveConsoleUser
   if ([string]::IsNullOrWhiteSpace($ru)) { throw $Txt_ErrorNoRU }
 
-  # Ajusta horário pro schtasks aceitar
   $now    = Get-Date
   $target = Round-ToSchtasksMinute $when
   if ($target -le $now) { $target = Round-ToSchtasksMinute($now.AddMinutes(2)) }
@@ -287,9 +428,7 @@ function New-RePromptTask {
     }
   }
 
-  if (-not $created) {
-    throw "Falha ao criar a tarefa UI."
-  }
+  if (-not $created) { throw "Falha ao criar a tarefa UI." }
 }
 
 # -------- Executar agora: prepara Worker e dispara --------
@@ -422,8 +561,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    # para teste rápido, use .AddMinutes(2)
-    $runAt=(Get-Date).AddMinutes(1)
+    $runAt=(Get-Date).AddHours(1)   # corrigido (antes: AddMinutes(1) para teste)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -445,6 +583,3 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
-
-
-
