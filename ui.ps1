@@ -273,14 +273,14 @@ function Mount-IsoX {
     Mount-DiskImage -ImagePath \$IsoPath -ErrorAction Stop
     \$volNew = Get-DiskImage -ImagePath \$IsoPath | Get-Volume
     \$oldDrv = \$volNew.DriveLetter + ':'
-    \$newDrv = "\$IsoDrive:"
+    \$newDrv = \$IsoDrive + ':'
 
     Get-CimInstance -Class Win32_Volume |
       Where-Object { \$_.DriveLetter -eq \$oldDrv } |
       Set-CimInstance -Arguments @{ DriveLetter = \$newDrv }
 
-    Write-WorkerLog "ISO montada em \$newDrv (antes: \$oldDrv)."
-    return "\$IsoDrive:\"
+    Write-WorkerLog ("ISO montada em {0} (antes: {1})." -f \$newDrv, \$oldDrv)
+    return (\$IsoDrive + ':\')
   } catch {
     Write-WorkerLog "Falha ao montar ISO: \$($_.Exception.Message)"
     throw
@@ -561,7 +561,7 @@ $BtnNow.Add_Click({
 $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
-    $runAt=(Get-Date).AddHours(1)   # corrigido (antes: AddMinutes(1) para teste)
+    $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
