@@ -44,9 +44,8 @@ $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
 # Conteúdo do worker: deixa rastro + reinicia (altere à vontade)
 $DefaultWorkerBody = @'
-# Worker em SYSTEM — teste visível + reboot
-"Ran at $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
-MSG * TESTE
+if(-not(Test-Path "C:\ProgramData\Update11")){New-Item "C:\ProgramData\Update11" -ItemType Directory -Force|Out-Null}
+Set-Content -Path "C:\ProgramData\Update11\disparador.txt" -Value "OK"
 '@
 
 # (Opcional) Bootstrap GitHub quando rodando via IEX
@@ -423,7 +422,7 @@ $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
     # para teste rápido, use .AddMinutes(2)
-    $runAt=(Get-Date).AddMinutes(1)
+    $runAt=(Get-Date).AddMinutes(2)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
@@ -445,5 +444,6 @@ $BtnDelay2.Add_Click({
 })
 
 $null = $window.ShowDialog()
+
 
 
