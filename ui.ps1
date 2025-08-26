@@ -42,10 +42,10 @@ $LogPath         = Join-Path $AppRoot 'ui.log'
 # PowerShell 64-bit explícito
 $PsExeFull       = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
-# Conteúdo do worker: deixa rastro e reinicia (mude à vontade)
+# Conteúdo do worker: deixa rastro + reinicia (altere à vontade)
 $DefaultWorkerBody = @'
 # Worker em SYSTEM — teste visível + reboot
-"Ran at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
+"Ran at $(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')" | Out-File C:\ProgramData\UpdateW11\ran.txt -Append -Encoding utf8
 Restart-Computer -Force
 '@
 
@@ -184,6 +184,7 @@ function Ensure-WorkerBootstrapCmd {
     'set PSEXEPATH=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
     'if not exist "%PSEXEPATH%" set PSEXEPATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
     'echo [%date% %time%] Using "%PSEXEPATH%" >> "%LOG%"',
+    'if not exist "%APPROOT%\worker.ps1" ( echo [%date% %time%] ERRO: worker.ps1 ausente >> "%LOG%" & exit /b 2 )',
     '"%PSEXEPATH%" -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "%APPROOT%\worker.ps1" >> "%LOG%" 2>&1',
     'echo [%date% %time%] DONE code=%errorlevel% >> "%LOG%"',
     'endlocal',
@@ -192,19 +193,50 @@ function Ensure-WorkerBootstrapCmd {
   [IO.File]::WriteAllText($WorkerCMD, $cmd, (New-Object System.Text.UTF8Encoding($true)))
 }
 
-function Ensure-WorkerTask {
+# --- Valida a existência dos artefatos; recria se necessário ---
+function Ensure-WorkerArtifacts {
+  if (-not (Test-Path -LiteralPath $AppRoot)) {
+    New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
+  }
   Ensure-WorkerScript
   Ensure-WorkerBootstrapCmd
-
-  # Agendar o .CMD (não o powershell diretamente)
-  $trValue = '"' + $WorkerCMD + '"'
-
-  $exists = (schtasks /Query /TN $WorkerTaskName 2>$null)
-  if (-not $?) {
-    schtasks /Create /TN $WorkerTaskName /TR $trValue /SC ONCE /SD 01/01/2099 /ST 00:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
-  } else {
-    schtasks /Change /TN $WorkerTaskName /TR $trValue | Out-Null
+  # Verificações e logs
+  $missing = @()
+  if (-not (Test-Path -LiteralPath $WorkerPath)) { $missing += $WorkerPath }
+  if (-not (Test-Path -LiteralPath $WorkerCMD))  { $missing += $WorkerCMD }
+  if ($missing.Count -gt 0) {
+    $msg = "Artefatos ausentes: " + ($missing -join ', ')
+    Write-UiLog $msg
+    throw $msg
   }
+
+  try {
+    $wp = Get-Item -LiteralPath $WorkerPath
+    $wc = Get-Item -LiteralPath $WorkerCMD
+    Write-UiLog ("WorkerPath={0} ({1} bytes); WorkerCMD={2} ({3} bytes)" -f $wp.FullName,$wp.Length,$wc.FullName,$wc.Length)
+  } catch {}
+}
+
+# --- Cria/REcria a tarefa do Worker apontando para o .CMD ---
+function Ensure-WorkerTask {
+  Ensure-WorkerArtifacts
+
+  $trValue = '"' + $WorkerCMD + '"'
+  # elimina e recria sempre (evita lixo de versões antigas)
+  try { schtasks /Delete /TN $WorkerTaskName /F | Out-Null } catch {}
+
+  $argsCreate = @('/Create','/TN',$WorkerTaskName,'/TR',$trValue,'/SC','ONCE','/SD','01/01/2099','/ST','00:00','/RL','HIGHEST','/RU','SYSTEM','/F')
+  $outCreate  = schtasks @argsCreate 2>&1
+  $rcCreate   = $LASTEXITCODE
+  Write-UiLog ("Create Worker rc={0} out={1}" -f $rcCreate, ($outCreate -join ' '))
+
+  if ($rcCreate -ne 0) {
+    throw ("Falha ao criar Worker. Saída:`n{0}" -f ($outCreate -join [Environment]::NewLine))
+  }
+
+  # Confirma o /TR gravado
+  $outQuery = schtasks /Query /TN $WorkerTaskName /V /FO LIST 2>&1
+  Write-UiLog ("Query Worker ->`n{0}" -f ($outQuery -join [Environment]::NewLine))
 }
 
 # ---------- Utilidades para agendar no minuto correto ----------
@@ -248,24 +280,28 @@ function New-RePromptTask {
     $output = schtasks @args 2>&1
     if ($LASTEXITCODE -eq 0) {
       $created = $true
-      try { Add-Content -LiteralPath $LogPath -Value ("[{0}] Tarefa UI criada: SD={1} ST={2} RU={3}" -f (Get-Date), $sd, $st, $ru) } catch {}
+      Write-UiLog ("Tarefa UI criada: SD={0} ST={1} RU={2}" -f $sd, $st, $ru)
       break
     } else {
-      try { Add-Content -LiteralPath $LogPath -Value ("[{0}] Falha criar UI SD={1}: {2}" -f (Get-Date), $sd, ($output -join ' ')) } catch {}
+      Write-UiLog ("Falha criar UI com SD={0}: {1}" -f $sd, ($output -join ' '))
     }
   }
 
   if (-not $created) {
-    throw "Falha ao criar a tarefa. Saída do schtasks:`n$($output -join [Environment]::NewLine)"
+    throw "Falha ao criar a tarefa UI."
   }
 }
 
-# -------- Executar agora: dispara o worker (SYSTEM) --------
+# -------- Executar agora: prepara Worker e dispara --------
 function Run-Now {
   try {
     Ensure-WorkerTask
-    $out = schtasks /Run /TN $WorkerTaskName 2>&1
-    Write-UiLog ("schtasks /Run -> {0}" -f ($out -join ' '))
+    $outRun = schtasks /Run /TN $WorkerTaskName 2>&1
+    $rcRun  = $LASTEXITCODE
+    Write-UiLog ("Run Worker rc={0} out={1}" -f $rcRun, ($outRun -join ' '))
+    if ($rcRun -ne 0) {
+      throw ("Falha ao iniciar Worker (rc={0}). Saída:`n{1}" -f $rcRun, ($outRun -join [Environment]::NewLine))
+    }
   } catch {
     Add-Type -AssemblyName PresentationFramework | Out-Null
     [System.Windows.MessageBox]::Show("$Txt_ErrorRunPrefix`n$($_.Exception.Message)", $Txt_ErrorTitle,'OK','Error') | Out-Null
@@ -387,7 +423,7 @@ $BtnDelay1.Add_Click({
   $BtnDelay1.IsEnabled=$false; $BtnDelay2.IsEnabled=$false; $BtnNow.IsEnabled=$false
   try {
     # para teste rápido, use .AddMinutes(2)
-    $runAt=(Get-Date).AddMinutes(2)
+    $runAt=(Get-Date).AddHours(1)
     New-RePromptTask -when $runAt
     [System.Windows.MessageBox]::Show(($Txt_ScheduledFmt -f $runAt), $Txt_ScheduledTitle,'OK','Information') | Out-Null
   } catch {
