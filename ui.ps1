@@ -1,11 +1,17 @@
 #requires -version 5.1
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+$ErrorActionPreference = 'Stop'
 
 # ===================== CONFIG =====================
-$AnswerFile = 'C:\ProgramData\Answer.txt'
-$UiScript   = 'C:\ProgramData\ShowChoice.ps1'
+$AnswerFile  = 'C:\ProgramData\Answer.txt'
+$UiScript    = 'C:\ProgramData\ShowChoice.ps1'
 
-# ===================== UI (Win11-like) =====================
+# Garante pasta
+$dir = Split-Path $UiScript
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+# ===================== UI (Win11-like, robusto) =====================
+# (Here-string com aspas simples para não expandir variáveis)
 $ui = @'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -21,7 +27,7 @@ function New-RoundRegion([System.Drawing.Rectangle]$rect, [int]$radius){
   return $gp
 }
 
-# P/Invoke para dark mode (classe única para este processo)
+# Classe única p/ dark mode (se disponível)
 if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.DwmUtil', $false) } | Where-Object { $_ })) {
   Add-Type -TypeDefinition @"
 using System;
@@ -143,7 +149,7 @@ $lblSub.AutoSize = $true
 $lblSub.Location = New-Object System.Drawing.Point(12,38)
 $card.Controls.Add($lblSub)
 
-# Botões moderninhos
+# Botões
 $btnPanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $btnPanel.FlowDirection = 'LeftToRight'; $btnPanel.WrapContents = $false
 $btnPanel.Dock = 'Bottom'; $btnPanel.Height = 80; $btnPanel.Padding = '8,8,8,8'
@@ -201,23 +207,44 @@ $form.Add_KeyDown({ param($s,$e) if($e.KeyCode -eq 'Escape'){ $form.Close() } })
 [void]$form.ShowDialog()
 '@
 
-# Substitui o caminho do arquivo no UI
+# Substitui caminho do arquivo dentro do UI
 $ui = $ui.Replace('[[ANSWERFILE]]', $AnswerFile)
 Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
 
-# ===================== LAUNCHER ROBUSTO (sem conflito de tipos) =====================
-$launcherType = [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType('GDL.Session.Launcher', $false) } | Where-Object { $_ }
-if (-not $launcherType) {
+# ===================== LAUNCHER: enumera sessões e injeta em TODAS =====================
+# Carrega tipos apenas 1x por processo
+$launcherLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType('GDL.Broadcast.SessionLauncher', $false) } | Where-Object { $_ }
+if (-not $launcherLoaded) {
   $src = @"
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
-namespace GDL.Session {
-  public static class Launcher {
-    [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
-    [DllImport("wtsapi32.dll", SetLastError=true)] static extern bool WTSQueryUserToken(uint SessionId, out IntPtr Token);
+namespace GDL.Broadcast {
+
+  public enum WTS_CONNECTSTATE_CLASS {
+    Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct WTS_SESSION_INFO {
+    public Int32 SessionID;
+    public IntPtr pWinStationName;
+    public WTS_CONNECTSTATE_CLASS State;
+  }
+
+  public static class Native {
+    [DllImport("wtsapi32.dll", SetLastError=true)]
+    public static extern bool WTSEnumerateSessions(IntPtr hServer, int Reserved, int Version, out IntPtr ppSessionInfo, out int pCount);
+
+    [DllImport("wtsapi32.dll")]
+    public static extern void WTSFreeMemory(IntPtr pMemory);
+
+    [DllImport("kernel32.dll")] public static extern IntPtr WTSGetActiveConsoleSessionId();
+
+    [DllImport("wtsapi32.dll", SetLastError=true)] public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr Token);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr hExistingToken, UInt32 dwDesiredAccess, IntPtr lpTokenAttributes, Int32 ImpersonationLevel, Int32 TokenType, out IntPtr phNewToken);
     [DllImport("userenv.dll", SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
     [DllImport("userenv.dll", SetLastError=true)] static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
@@ -228,11 +255,10 @@ namespace GDL.Session {
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr ProcessHandle, UInt32 DesiredAccess, out IntPtr TokenHandle);
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     static extern bool CreateProcessWithTokenW(IntPtr hToken, UInt32 dwLogonFlags, string lpApplicationName, string lpCommandLine, UInt32 dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr hObject);
 
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-    struct STARTUPINFO {
+    public struct STARTUPINFO {
       public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
       public int dwX; public int dwY; public int dwXSize; public int dwYSize;
       public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
@@ -240,28 +266,25 @@ namespace GDL.Session {
       public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
     }
     [StructLayout(LayoutKind.Sequential)]
-    struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+    public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
 
-    const UInt32 GENERIC_ALL = 0x10000000;
-    const int SecurityImpersonation = 2;
-    const int TokenPrimary = 1;
-    const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
-    const UInt32 LOGON_WITH_PROFILE = 0x00000001;
-    const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
+    public const UInt32 GENERIC_ALL = 0x10000000;
+    public const int SecurityImpersonation = 2;
+    public const int TokenPrimary = 1;
+    public const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    public const UInt32 LOGON_WITH_PROFILE = 0x00000001;
+    public const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
 
-    const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-    const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
+    public const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    public const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
 
-    const UInt32 TOKEN_QUERY = 0x0008;
-    const UInt32 TOKEN_DUPLICATE = 0x0002;
-    const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
-    const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
+    public const UInt32 TOKEN_QUERY = 0x0008;
+    public const UInt32 TOKEN_DUPLICATE = 0x0002;
+    public const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
+    public const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
 
-    static bool LaunchViaWTS(string cmdLine) {
+    public static bool LaunchViaWTS(uint sessionId, string cmdLine) {
       try {
-        uint sessionId = WTSGetActiveConsoleSessionId();
-        if (sessionId == 0xFFFFFFFF) return false;
-
         IntPtr userToken;
         if (!WTSQueryUserToken(sessionId, out userToken)) return false;
 
@@ -273,6 +296,7 @@ namespace GDL.Session {
 
         IntPtr env;
         CreateEnvironmentBlock(out env, primaryToken, false);
+
         STARTUPINFO si = new STARTUPINFO();
         si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
         si.lpDesktop = @"winsta0\default";
@@ -288,16 +312,13 @@ namespace GDL.Session {
       } catch { return false; }
     }
 
-    static bool LaunchViaExplorerToken(string cmdLine) {
+    public static bool LaunchViaExplorerToken(uint sessionId, string cmdLine) {
       try {
-        uint active = WTSGetActiveConsoleSessionId();
-        if (active == 0xFFFFFFFF) return false;
+        var explorer = Process.GetProcessesByName("explorer")
+                        .FirstOrDefault(p => { try { return (uint)p.SessionId == sessionId; } catch { return false; } });
+        if (explorer == null) return false;
 
-        var candidate = Process.GetProcessesByName("explorer")
-                          .FirstOrDefault(p => { try { return (uint)p.SessionId == active; } catch { return false; } });
-        if (candidate == null) return false;
-
-        IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, candidate.Id);
+        IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, explorer.Id);
         if (hProc == IntPtr.Zero) return false;
 
         IntPtr hTok;
@@ -317,9 +338,27 @@ namespace GDL.Session {
       } catch { return false; }
     }
 
-    public static bool LaunchInActiveSession(string cmdLine) {
-      if (LaunchViaWTS(cmdLine)) return true;
-      if (LaunchViaExplorerToken(cmdLine)) return true;
+    public static IEnumerable<Tuple<uint, WTS_CONNECTSTATE_CLASS>> EnumerateSessions() {
+      IntPtr pInfo;
+      int count;
+      if (!WTSEnumerateSessions(IntPtr.Zero, 0, 1, out pInfo, out count)) yield break;
+      int dataSize = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+      try {
+        for (int i=0; i<count; i++) {
+          IntPtr rec = new IntPtr(pInfo.ToInt64() + i*dataSize);
+          WTS_SESSION_INFO si = (WTS_SESSION_INFO)Marshal.PtrToStructure(rec, typeof(WTS_SESSION_INFO));
+          yield return Tuple.Create((uint)si.SessionID, si.State);
+        }
+      } finally {
+        WTSFreeMemory(pInfo);
+      }
+    }
+  }
+
+  public static class SessionLauncher {
+    public static bool LaunchInSession(uint sessionId, string cmdLine) {
+      if (Native.LaunchViaWTS(sessionId, cmdLine)) return true;        // SYSTEM path
+      if (Native.LaunchViaExplorerToken(sessionId, cmdLine)) return true; // Admin elevated path
       return false;
     }
   }
@@ -328,26 +367,49 @@ namespace GDL.Session {
   Add-Type -TypeDefinition $src -Language CSharp
 }
 
+# Garante TermService
+try { Start-Service -Name TermService -ErrorAction Stop } catch {}
+
 # PS 64-bit garantido
 $PS64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $PS64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
-# Start TermService (frequentemente desliga e atrapalha WTSQueryUserToken)
-try { Start-Service -Name TermService -ErrorAction Stop } catch {}
+# Grava UI
+Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
 
-# Gravar UI script
-if (-not (Test-Path (Split-Path $UiScript))) { New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force | Out-Null }
-Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
-
-# Comando a ser lançado na sessão do usuário
+# Comando a ser lançado em cada sessão
 $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$UiScript`""
 $cmd    = "`"$PS64`" $psArgs"
 
-# Dispara
-$ok = [GDL.Session.Launcher]::LaunchInActiveSession($cmd)
-if (-not $ok) {
-  Write-Warning "Ainda não consegui abrir o formulário na sessão do usuário (confirme: Admin/SYSTEM, TermService em execução e explorer.exe na sessão console)."
-  if (-not (Test-Path $AnswerFile)) { Set-Content -Path $AnswerFile -Value 'NOUSER' -Encoding UTF8 }
-} else {
-  Write-Host "Form exibido ao usuário. Resposta irá para $AnswerFile"
+# ===================== ENUMERA TODAS AS SESSÕES E DISPARA =====================
+$launched = @()
+$failed   = @()
+
+# Preferimos sessões que têm explorer.exe (sessões interativas)
+# Mas ainda assim tentamos todas que aparecem na WTS (Active/Connected/etc.)
+$sessions = [GDL.Broadcast.Native]::EnumerateSessions() | ForEach-Object {
+  [pscustomobject]@{ Id = $_.Item1; State = $_.Item2 }
+}
+
+foreach ($sess in $sessions) {
+  $sid = [uint32]$sess.Id
+  # Se houver explorer nessa sessão, é um bom alvo; se não houver, ainda tentamos (WTS pode injetar mesmo sem explorer)
+  $hasExplorer = (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid }) -ne $null
+
+  $ok = [GDL.Broadcast.SessionLauncher]::LaunchInSession($sid, $cmd)
+  if ($ok) {
+    $launched += $sid
+  } else {
+    $failed   += [pscustomobject]@{ SessionId = $sid; State = $sess.State; Explorer = $hasExplorer }
+  }
+}
+
+Write-Host "Sessões alvo: $($sessions.Count) | Disparadas com sucesso: $($launched.Count) | Falhas: $($failed.Count)"
+if ($failed.Count -gt 0) {
+  Write-Warning ("Falhas por sessão: " + ($failed | ConvertTo-Json -Compress))
+}
+
+# Se nenhuma sessão foi acionada, grava NOUSER (para sua lógica detectar)
+if ($launched.Count -eq 0 -and -not (Test-Path $AnswerFile)) {
+  Set-Content -Path $AnswerFile -Value 'NOUSER' -Encoding UTF8
 }
