@@ -1,141 +1,353 @@
-# ===================== LAUNCHER ROBUSTO (mostra UI na sessão ativa) =====================
-$src = @"
+#requires -version 5.1
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
+# ===================== CONFIG =====================
+$AnswerFile = 'C:\ProgramData\Answer.txt'
+$UiScript   = 'C:\ProgramData\ShowChoice.ps1'
+
+# ===================== UI (Win11-like) =====================
+$ui = @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+function New-RoundRegion([System.Drawing.Rectangle]$rect, [int]$radius){
+  $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $d = $radius * 2
+  $gp.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
+  $gp.AddArc($rect.Right-$d, $rect.Y, $d, $d, 270, 90)
+  $gp.AddArc($rect.Right-$d, $rect.Bottom-$d, $d, $d, 0, 90)
+  $gp.AddArc($rect.X, $rect.Bottom-$d, $d, $d, 90, 90)
+  $gp.CloseFigure()
+  return $gp
+}
+
+# P/Invoke para dark mode (classe única para este processo)
+if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.DwmUtil', $false) } | Where-Object { $_ })) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace GDL.Win {
+  public static class DwmUtil {
+    [DllImport("dwmapi.dll", PreserveSig=true)]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_NEW = 20;
+  }
+}
+"@
+}
+
+# Paleta
+$bg      = [System.Drawing.Color]::FromArgb(32,32,36)
+$panelBg = [System.Drawing.Color]::FromArgb(40,40,46)
+$accent  = [System.Drawing.Color]::FromArgb(0,120,212)
+$text    = [System.Drawing.Color]::FromArgb(230,230,235)
+$subtext = [System.Drawing.Color]::FromArgb(180,180,190)
+$border  = [System.Drawing.Color]::FromArgb(60,60,70)
+
+# Form
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Agendamento'
+$form.FormBorderStyle = 'None'
+$form.StartPosition = 'CenterScreen'
+$form.Size = New-Object System.Drawing.Size(520,280)
+$form.TopMost = $true
+$form.BackColor = $bg
+$form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+# Dark + borda arredondada
+$form.add_Shown({
+  try {
+    $dark = 1
+    [void][GDL.Win.DwmUtil]::DwmSetWindowAttribute($form.Handle, [GDL.Win.DwmUtil]::DWMWA_USE_IMMERSIVE_DARK_MODE_NEW, [ref]$dark, 4)
+    [void][GDL.Win.DwmUtil]::DwmSetWindowAttribute($form.Handle, [GDL.Win.DwmUtil]::DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, [ref]$dark, 4)
+  } catch {}
+  $r = New-Object System.Drawing.Rectangle(0,0,$form.Width,$form.Height)
+  $form.Region = New-Object System.Drawing.Region( (New-RoundRegion $r 18) )
+})
+$form.add_Resize({
+  $r = New-Object System.Drawing.Rectangle(0,0,$form.Width,$form.Height)
+  $form.Region = New-Object System.Drawing.Region( (New-RoundRegion $r 18) )
+})
+
+# Titlebar
+$titleBar = New-Object System.Windows.Forms.Panel
+$titleBar.Height = 42; $titleBar.Dock = 'Top'; $titleBar.BackColor = $panelBg
+$form.Controls.Add($titleBar)
+$titleBar.Paint += {
+  param($s,$e)
+  $e.Graphics.SmoothingMode = 'AntiAlias'
+  $pen = New-Object System.Drawing.Pen($border)
+  $e.Graphics.DrawLine($pen, 0, $titleBar.Height-1, $titleBar.Width, $titleBar.Height-1)
+  $pen.Dispose()
+}
+$lblTitle = New-Object System.Windows.Forms.Label
+$lblTitle.Text = 'Atualização obrigatória'
+$lblTitle.ForeColor = $text
+$lblTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+$lblTitle.AutoSize = $true
+$lblTitle.Location = New-Object System.Drawing.Point(18, 11)
+$titleBar.Controls.Add($lblTitle)
+
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Text = '✕'
+$btnClose.FlatStyle = 'Flat'
+$btnClose.FlatAppearance.BorderSize = 0
+$btnClose.ForeColor = $subtext
+$btnClose.BackColor = $panelBg
+$btnClose.Width = 40; $btnClose.Height = 32
+$btnClose.Location = New-Object System.Drawing.Point($form.Width-50,5)
+$btnClose.Anchor = 'Top,Right'
+$btnClose.Add_MouseEnter({ $btnClose.ForeColor = [System.Drawing.Color]::White })
+$btnClose.Add_MouseLeave({ $btnClose.ForeColor = $subtext })
+$btnClose.Add_Click({ $form.Close() })
+$titleBar.Controls.Add($btnClose)
+
+# Arrastar janela
+$mouseDown = $false; $pt = New-Object System.Drawing.Point
+$titleBar.Add_MouseDown({ param($s,$e) if($e.Button -eq 'Left'){ $mouseDown=$true; $pt=$e.Location } })
+$titleBar.Add_MouseMove({ param($s,$e) if($mouseDown){ $form.Left += ($e.X - $pt.X); $form.Top += ($e.Y - $pt.Y) } })
+$titleBar.Add_MouseUp({ $mouseDown=$false })
+
+# Conteúdo
+$content = New-Object System.Windows.Forms.Panel
+$content.Dock = 'Fill'; $content.Padding = '22,18,22,22'; $content.BackColor = $bg
+$form.Controls.Add($content)
+
+$card = New-Object System.Windows.Forms.Panel
+$card.BackColor = $panelBg; $card.Dock = 'Fill'; $card.Padding = '22,18,22,22'
+$card.add_Paint({
+  param($s,$e)
+  $rect = New-Object System.Drawing.Rectangle(0,0,$card.Width-1,$card.Height-1)
+  $gp = New-RoundRegion $rect 16
+  $e.Graphics.SmoothingMode = 'AntiAlias'
+  $e.Graphics.FillPath( (New-Object System.Drawing.SolidBrush $panelBg), $gp)
+  $e.Graphics.DrawPath( (New-Object System.Drawing.Pen $border), $gp)
+  $gp.Dispose()
+})
+$content.Controls.Add($card)
+
+$lblMain = New-Object System.Windows.Forms.Label
+$lblMain.Text = 'Você pode executar agora ou adiar.'
+$lblMain.ForeColor = $text
+$lblMain.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12)
+$lblMain.AutoSize = $true
+$lblMain.Location = New-Object System.Drawing.Point(12,10)
+$card.Controls.Add($lblMain)
+
+$lblSub = New-Object System.Windows.Forms.Label
+$lblSub.Text = 'Escolha uma opção abaixo. A operação é segura e rápida.'
+$lblSub.ForeColor = $subtext
+$lblSub.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$lblSub.AutoSize = $true
+$lblSub.Location = New-Object System.Drawing.Point(12,38)
+$card.Controls.Add($lblSub)
+
+# Botões moderninhos
+$btnPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$btnPanel.FlowDirection = 'LeftToRight'; $btnPanel.WrapContents = $false
+$btnPanel.Dock = 'Bottom'; $btnPanel.Height = 80; $btnPanel.Padding = '8,8,8,8'
+$card.Controls.Add($btnPanel)
+
+function New-PillButton([string]$text,[System.Drawing.Color]$bg,[System.Drawing.Color]$fg,[System.Drawing.Color]$hoverBg){
+  $b = New-Object System.Windows.Forms.Button
+  $b.Text = $text
+  $b.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+  $b.FlatStyle = 'Flat'
+  $b.FlatAppearance.BorderSize = 0
+  $b.BackColor = $bg
+  $b.ForeColor = $fg
+  $b.Width = 150; $b.Height = 40; $b.Margin = '8,8,8,8'
+  $b.add_Paint({
+    param($s,$e)
+    $btn = $s -as [System.Windows.Forms.Button]
+    $e.Graphics.SmoothingMode = 'AntiAlias'
+    $rect = New-Object System.Drawing.Rectangle(0,0,$btn.Width-1,$btn.Height-1)
+    $gp = New-RoundRegion $rect 20
+    $e.Graphics.FillPath( (New-Object System.Drawing.SolidBrush $btn.BackColor), $gp )
+    $outline = [System.Drawing.Color]::FromArgb(80, $border.R, $border.G, $border.B)
+    $e.Graphics.DrawPath( (New-Object System.Drawing.Pen $outline), $gp )
+    $gp.Dispose()
+    $fmt = New-Object System.Drawing.StringFormat
+    $fmt.Alignment = 'Center'; $fmt.LineAlignment = 'Center'
+    $e.Graphics.DrawString($btn.Text, $btn.Font, (New-Object System.Drawing.SolidBrush $btn.ForeColor), $rect, $fmt)
+    $fmt.Dispose()
+  })
+  $b.Add_MouseEnter({ param($s,$e) $s.BackColor = $hoverBg })
+  $b.Add_MouseLeave({ param($s,$e) $s.BackColor = $bg })
+  return $b
+}
+
+function Write-Answer([string]$val){
+  try { [System.IO.File]::WriteAllText('[[ANSWERFILE]]', $val, [Text.Encoding]::UTF8) } catch {}
+  $form.Close()
+}
+
+$btnNow = New-PillButton 'Executar agora' $accent [System.Drawing.Color]::White ([System.Drawing.Color]::FromArgb(0,99,175))
+$btn1H  = New-PillButton 'Adiar 1 hora' ([System.Drawing.Color]::FromArgb(58,58,66)) $text ([System.Drawing.Color]::FromArgb(75,75,86))
+$btn2H  = New-PillButton 'Adiar 2 horas' ([System.Drawing.Color]::FromArgb(58,58,66)) $text ([System.Drawing.Color]::FromArgb(75,75,86))
+
+$btnNow.Add_Click({ Write-Answer 'NOW' })
+$btn1H.Add_Click({ Write-Answer '1H' })
+$btn2H.Add_Click({ Write-Answer '2H' })
+
+$btnPanel.Controls.Add($btnNow)
+$btnPanel.Controls.Add($btn1H)
+$btnPanel.Controls.Add($btn2H)
+
+$form.KeyPreview = $true
+$form.Add_KeyDown({ param($s,$e) if($e.KeyCode -eq 'Escape'){ $form.Close() } })
+
+[void]$form.ShowDialog()
+'@
+
+# Substitui o caminho do arquivo no UI
+$ui = $ui.Replace('[[ANSWERFILE]]', $AnswerFile)
+Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
+
+# ===================== LAUNCHER ROBUSTO (sem conflito de tipos) =====================
+$launcherType = [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType('GDL.Session.Launcher', $false) } | Where-Object { $_ }
+if (-not $launcherType) {
+  $src = @"
 using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 
-public static class UserSessionLauncher {
-  // ----- WTS / SYSTEM path -----
-  [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
-  [DllImport("wtsapi32.dll", SetLastError=true)] static extern bool WTSQueryUserToken(uint SessionId, out IntPtr Token);
-  [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr hExistingToken, UInt32 dwDesiredAccess, IntPtr lpTokenAttributes, Int32 ImpersonationLevel, Int32 TokenType, out IntPtr phNewToken);
-  [DllImport("userenv.dll", SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
-  [DllImport("userenv.dll", SetLastError=true)] static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
-  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  static extern bool CreateProcessAsUser(IntPtr hToken, string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+namespace GDL.Session {
+  public static class Launcher {
+    [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("wtsapi32.dll", SetLastError=true)] static extern bool WTSQueryUserToken(uint SessionId, out IntPtr Token);
+    [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr hExistingToken, UInt32 dwDesiredAccess, IntPtr lpTokenAttributes, Int32 ImpersonationLevel, Int32 TokenType, out IntPtr phNewToken);
+    [DllImport("userenv.dll", SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+    [DllImport("userenv.dll", SetLastError=true)] static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    static extern bool CreateProcessAsUser(IntPtr hToken, string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
 
-  // ----- Non-SYSTEM fallback: explorer.exe token + CreateProcessWithTokenW -----
-  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr ProcessHandle, UInt32 DesiredAccess, out IntPtr TokenHandle);
-  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  static extern bool CreateProcessWithTokenW(IntPtr hToken, UInt32 dwLogonFlags, string lpApplicationName, string lpCommandLine, UInt32 dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+    [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr ProcessHandle, UInt32 DesiredAccess, out IntPtr TokenHandle);
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    static extern bool CreateProcessWithTokenW(IntPtr hToken, UInt32 dwLogonFlags, string lpApplicationName, string lpCommandLine, UInt32 dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
 
-  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr hObject);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr hObject);
 
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-  struct STARTUPINFO {
-    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
-    public int dwX; public int dwY; public int dwXSize; public int dwYSize;
-    public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
-    public int dwFlags; public short wShowWindow; public short cbReserved2;
-    public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
-  }
-  [StructLayout(LayoutKind.Sequential)]
-  struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    struct STARTUPINFO {
+      public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+      public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+      public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
+      public int dwFlags; public short wShowWindow; public short cbReserved2;
+      public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
 
-  const UInt32 GENERIC_ALL = 0x10000000;
-  const int SecurityImpersonation = 2;
-  const int TokenPrimary = 1;
-  const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
-  const UInt32 LOGON_WITH_PROFILE = 0x00000001;
-  const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
+    const UInt32 GENERIC_ALL = 0x10000000;
+    const int SecurityImpersonation = 2;
+    const int TokenPrimary = 1;
+    const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    const UInt32 LOGON_WITH_PROFILE = 0x00000001;
+    const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
 
-  const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-  const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
+    const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
 
-  const UInt32 TOKEN_QUERY = 0x0008;
-  const UInt32 TOKEN_DUPLICATE = 0x0002;
-  const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
-  const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
+    const UInt32 TOKEN_QUERY = 0x0008;
+    const UInt32 TOKEN_DUPLICATE = 0x0002;
+    const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
+    const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
 
-  static bool LaunchViaWTS(string cmdLine) {
-    try {
-      uint sessionId = WTSGetActiveConsoleSessionId();
-      if (sessionId == 0xFFFFFFFF) return false;
+    static bool LaunchViaWTS(string cmdLine) {
+      try {
+        uint sessionId = WTSGetActiveConsoleSessionId();
+        if (sessionId == 0xFFFFFFFF) return false;
 
-      IntPtr userToken;
-      if (!WTSQueryUserToken(sessionId, out userToken)) return false;
+        IntPtr userToken;
+        if (!WTSQueryUserToken(sessionId, out userToken)) return false;
 
-      IntPtr primaryToken;
-      if (!DuplicateTokenEx(userToken, GENERIC_ALL, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out primaryToken)) {
+        IntPtr primaryToken;
+        if (!DuplicateTokenEx(userToken, GENERIC_ALL, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out primaryToken)) {
+          CloseHandle(userToken);
+          return false;
+        }
+
+        IntPtr env;
+        CreateEnvironmentBlock(out env, primaryToken, false);
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        si.lpDesktop = @"winsta0\default";
+
+        PROCESS_INFORMATION pi;
+        bool ok = CreateProcessAsUser(primaryToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, env, null, ref si, out pi);
+
+        if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
+        CloseHandle(primaryToken);
         CloseHandle(userToken);
-        return false;
-      }
+        return ok;
+      } catch { return false; }
+    }
 
-      IntPtr env;
-      CreateEnvironmentBlock(out env, primaryToken, false);
+    static bool LaunchViaExplorerToken(string cmdLine) {
+      try {
+        uint active = WTSGetActiveConsoleSessionId();
+        if (active == 0xFFFFFFFF) return false;
 
-      STARTUPINFO si = new STARTUPINFO();
-      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-      si.lpDesktop = @"winsta0\default";
+        var candidate = Process.GetProcessesByName("explorer")
+                          .FirstOrDefault(p => { try { return (uint)p.SessionId == active; } catch { return false; } });
+        if (candidate == null) return false;
 
-      PROCESS_INFORMATION pi;
-      bool ok = CreateProcessAsUser(primaryToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, env, null, ref si, out pi);
+        IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, candidate.Id);
+        if (hProc == IntPtr.Zero) return false;
 
-      if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        IntPtr hTok;
+        bool gotTok = OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY, out hTok);
+        CloseHandle(hProc);
+        if (!gotTok) return false;
 
-      if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
-      CloseHandle(primaryToken);
-      CloseHandle(userToken);
-      return ok;
-    } catch { return false; }
-  }
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        si.lpDesktop = @"winsta0\default";
+        PROCESS_INFORMATION pi;
+        bool ok = CreateProcessWithTokenW(hTok, LOGON_WITH_PROFILE, null, cmdLine, CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
 
-  static bool LaunchViaExplorerToken(string cmdLine) {
-    try {
-      // pega a sessão da console
-      uint active = WTSGetActiveConsoleSessionId();
-      if (active == 0xFFFFFFFF) return false;
+        if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        CloseHandle(hTok);
+        return ok;
+      } catch { return false; }
+    }
 
-      // encontra explorer.exe nessa sessão
-      var candidate = Process.GetProcessesByName("explorer")
-                        .FirstOrDefault(p => { try { return (uint)p.SessionId == active; } catch { return false; } });
-      if (candidate == null) return false;
-
-      IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, candidate.Id);
-      if (hProc == IntPtr.Zero) return false;
-
-      IntPtr hTok;
-      bool gotTok = OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY, out hTok);
-      CloseHandle(hProc);
-      if (!gotTok) return false;
-
-      // Usa CreateProcessWithTokenW (requer SeImpersonatePrivilege — admins elev. têm)
-      STARTUPINFO si = new STARTUPINFO();
-      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-      si.lpDesktop = @"winsta0\default";
-      PROCESS_INFORMATION pi;
-      bool ok = CreateProcessWithTokenW(hTok, LOGON_WITH_PROFILE, null, cmdLine, CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
-
-      if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
-      CloseHandle(hTok);
-      return ok;
-    } catch { return false; }
-  }
-
-  public static bool LaunchInActiveSession(string cmdLine) {
-    // 1) tenta via WTS (SYSTEM)
-    if (LaunchViaWTS(cmdLine)) return true;
-    // 2) fallback via token do explorer (admin elevado)
-    if (LaunchViaExplorerToken(cmdLine)) return true;
-    return false;
+    public static bool LaunchInActiveSession(string cmdLine) {
+      if (LaunchViaWTS(cmdLine)) return true;
+      if (LaunchViaExplorerToken(cmdLine)) return true;
+      return false;
+    }
   }
 }
 "@
-Add-Type -TypeDefinition $src -Language CSharp
+  Add-Type -TypeDefinition $src -Language CSharp
+}
 
-# Garante que vamos chamar o PowerShell 64-bit mesmo se este script rodar em host 32-bit
+# PS 64-bit garantido
 $PS64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $PS64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
+# Start TermService (frequentemente desliga e atrapalha WTSQueryUserToken)
+try { Start-Service -Name TermService -ErrorAction Stop } catch {}
+
+# Gravar UI script
+if (-not (Test-Path (Split-Path $UiScript))) { New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force | Out-Null }
+Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
+
+# Comando a ser lançado na sessão do usuário
 $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$UiScript`""
 $cmd    = "`"$PS64`" $psArgs"
 
-$ok = [UserSessionLauncher]::LaunchInActiveSession($cmd)
+# Dispara
+$ok = [GDL.Session.Launcher]::LaunchInActiveSession($cmd)
 if (-not $ok) {
-  Write-Warning "Ainda não consegui abrir o formulário na sessão do usuário (verifique: executar elevado, TermService ativo, há 'explorer.exe' na sessão ativa)."
-  if (-not (Test-Path 'C:\ProgramData\Answer.txt')) { Set-Content -Path 'C:\ProgramData\Answer.txt' -Value 'NOUSER' -Encoding UTF8 }
+  Write-Warning "Ainda não consegui abrir o formulário na sessão do usuário (confirme: Admin/SYSTEM, TermService em execução e explorer.exe na sessão console)."
+  if (-not (Test-Path $AnswerFile)) { Set-Content -Path $AnswerFile -Value 'NOUSER' -Encoding UTF8 }
 } else {
-  Write-Host "Form exibido para o usuário logado. Resposta irá para C:\ProgramData\Answer.txt"
+  Write-Host "Form exibido ao usuário. Resposta irá para $AnswerFile"
 }
