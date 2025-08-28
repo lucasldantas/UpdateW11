@@ -1,23 +1,16 @@
 #requires -version 5.1
-<#
-    Single-file: Launcher + UI
-    - Executa UI WPF em TODAS as sessões interativas.
-    - UI é TopMost, sem fechar sem escolha, sem cantos arredondados.
-    - Grava C:\ProgramData\Answer.txt com NOW / 1H / 2H.
-#>
-
 param(
-  [switch]$UiOnly  # uso interno: modo UI apenas (o launcher chama este mesmo arquivo com -UiOnly)
+  [switch]$UiOnly
 )
 
-try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
-# ==================== CONFIG / TEXTOS (edite aqui) ====================
+# ==================== CONFIG / TEXTOS ====================
 $AnswerFile   = 'C:\ProgramData\Answer.txt'
-$AppRoot      = 'C:\ProgramData\UpdateW11'  # usado só para salvar logs/artefatos se quiser expandir
+$AppRoot      = 'C:\ProgramData\UpdateW11'
+$UiLog        = Join-Path $AppRoot 'ui-debug.log'
 
-# Textos do UI
 $Txt_WindowTitle    = 'Agendar Execução'
 $Txt_HeaderTitle    = 'Atualização Obrigatória'
 $Txt_HeaderSubtitle = 'Você pode executar agora ou adiar por até 2 horas.'
@@ -25,28 +18,47 @@ $Txt_ActionLabel    = 'Ação:'
 $Txt_ActionLine1    = 'Realizar o update do Windows 10 para o Windows 11'
 $Txt_ActionLine2    = 'Tempo Estimado: 20 a 30 minutos'
 
-# Rótulos dos botões
 $Txt_BtnNow   = 'Executar agora'
 $Txt_Btn1H    = 'Adiar 1 hora'
 $Txt_Btn2H    = 'Adiar 2 horas'
-# =====================================================================
+# =========================================================
 
-# Garante diretórios
-try { if (-not (Test-Path -LiteralPath (Split-Path $AnswerFile))) { New-Item -ItemType Directory -Path (Split-Path $AnswerFile) -Force | Out-Null } } catch {}
+# pastas
+try {
+  $dirAns = Split-Path $AnswerFile
+  if ($dirAns -and -not (Test-Path $dirAns)) { New-Item -ItemType Directory -Path $dirAns -Force | Out-Null }
+  if (-not (Test-Path $AppRoot)) { New-Item -ItemType Directory -Path $AppRoot -Force | Out-Null }
+} catch {}
 
-# ------------------------- MODO UI -------------------------
+function Write-UiLog([string]$msg){
+  try {
+    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+    Add-Content -LiteralPath $UiLog -Value "[$stamp] $msg" -Encoding UTF8
+  } catch {}
+}
+
+# -------------------------- MODO UI --------------------------
 if ($UiOnly) {
-  # Garante STA
-  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-    $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    Start-Process -FilePath $ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',"`"$PSCommandPath`"","-UiOnly") | Out-Null
-    return
-  }
+  try {
+    # força STA
+    if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+      $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+      Write-UiLog "Rerun UI in STA"
+      Start-Process -FilePath $ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',"`"$PSCommandPath`"","-UiOnly") | Out-Null
+      return
+    }
 
-  Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
+    Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
-  # XAML (sem cantos arredondados, TopMost, sem botão fechar)
-  [xml]$xaml = @"
+    # trata exceções não tratadas do WPF (evita fechar mudo)
+    [System.Windows.Application]::Current.DispatcherUnhandledException += {
+      param($s,[System.Windows.Threading.DispatcherUnhandledExceptionEventArgs]$e)
+      Write-UiLog ("DispatcherUnhandledException: " + $e.Exception.Message)
+      try { [System.Windows.MessageBox]::Show($e.Exception.ToString(),'Erro na UI','OK','Error') | Out-Null } catch {}
+      $e.Handled = $true
+    }
+
+    [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="$Txt_WindowTitle"
@@ -64,7 +76,6 @@ if ($UiOnly) {
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <!-- Cabeçalho (retangular) -->
     <Border Grid.Row="0" Background="#111827" Padding="16">
       <StackPanel>
         <TextBlock Name="TitleText" Text="$Txt_HeaderTitle" Foreground="#e5e7eb"
@@ -74,7 +85,6 @@ if ($UiOnly) {
       </StackPanel>
     </Border>
 
-    <!-- Corpo -->
     <Border Grid.Row="2" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <StackPanel>
         <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
@@ -87,7 +97,6 @@ if ($UiOnly) {
       </StackPanel>
     </Border>
 
-    <!-- Botões (retangulares) -->
     <DockPanel Grid.Row="3">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
         <Button Name="BtnNow" Content="$Txt_BtnNow" Margin="8,0,0,0" Padding="16,8"
@@ -105,62 +114,73 @@ if ($UiOnly) {
 </Window>
 "@
 
-  # Carrega a janela
-  $reader = New-Object System.Xml.XmlNodeReader $xaml
-  $window = [Windows.Markup.XamlReader]::Load($reader)
+    $reader = New-Object System.Xml.XmlNodeReader $xaml
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+    if (-not $window) { throw "Falha ao carregar XAML (window nulo)." }
 
-  # Impede fechar (sem escolha)
-  $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
-  $window.add_Closing($script:closingHandler)
-  function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
+    # impedir fechar sem escolha
+    $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
+    $window.add_Closing($script:closingHandler)
+    function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-  # Arraste da janela (clique em qualquer lugar)
-  $window.Add_MouseLeftButtonDown({
-    if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) { try { $window.DragMove() } catch {} }
-  })
+    # arrastar
+    $window.Add_MouseLeftButtonDown({
+      if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+        try { $window.DragMove() } catch {}
+      }
+    })
 
-  # Foco após abrir
-  $window.Add_Loaded({
-    try {
-      $this.Activate()      | Out-Null
-      $this.BringIntoView() | Out-Null
-      $t = New-Object System.Windows.Threading.DispatcherTimer
-      $t.Interval = [TimeSpan]::FromMilliseconds(150)
-      $t.Add_Tick({ param($s,$e) try { $this.Activate() | Out-Null } catch {} ; $s.Stop() })
-      $t.Start()
-    } catch {}
-  })
+    # foco garantido
+    $window.Add_Loaded({
+      try {
+        $this.Activate() | Out-Null
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [TimeSpan]::FromMilliseconds(150)
+        $t.Add_Tick({ param($s,$e) try { $this.Activate() | Out-Null } catch {} ; $s.Stop() })
+        $t.Start()
+      } catch {}
+    })
 
-  # Botões
-  $BtnNow = $window.FindName('BtnNow')
-  $Btn1H  = $window.FindName('Btn1H')
-  $Btn2H  = $window.FindName('Btn2H')
+    $BtnNow = $window.FindName('BtnNow')
+    $Btn1H  = $window.FindName('Btn1H')
+    $Btn2H  = $window.FindName('Btn2H')
 
-  # Escrita segura do Answer.txt
-  function Write-Answer([string]$val) {
-    try { [IO.File]::WriteAllText($AnswerFile, $val, [Text.Encoding]::UTF8) } catch {}
-    Allow-Close $window
-    $window.Close()
+    function Write-Answer([string]$val) {
+      try { [IO.File]::WriteAllText($AnswerFile, $val, [Text.Encoding]::UTF8) } catch { Write-UiLog "Write Answer failed: $($_.Exception.Message)" }
+      Allow-Close $window
+      $window.Close()
+    }
+
+    $BtnNow.Add_Click({ Write-Answer 'NOW' })
+    $Btn1H.Add_Click({ Write-Answer '1H'  })
+    $Btn2H.Add_Click({ Write-Answer '2H'  })
+
+    Write-UiLog "ShowDialog()"
+    $null = $window.ShowDialog()
+    Write-UiLog "UI closed by user choice."
   }
-
-  $BtnNow.Add_Click({ Write-Answer 'NOW' })
-  $Btn1H.Add_Click({ Write-Answer '1H'  })
-  $Btn2H.Add_Click({ Write-Answer '2H'  })
-
-  $null = $window.ShowDialog()
+  catch {
+    $msg = "Falha ao exibir UI:`n$($_.Exception.Message)"
+    Write-UiLog $msg
+    try {
+      Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue | Out-Null
+      [System.Windows.MessageBox]::Show($msg,'Erro','OK','Error') | Out-Null
+    } catch {}
+    Start-Sleep -Seconds 2
+  }
   return
 }
 
-# ------------------------- MODO LAUNCHER (default) -------------------------
-# PowerShell 64-bit para lançar a UI
+# -------------------------- MODO LAUNCHER --------------------------
+# caminho PS 64-bit
 $Ps64 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $Ps64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
-# Comando para chamar ESTE arquivo com -UiOnly
+# comando para chamar o próprio arquivo com -UiOnly
 $Self = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $cmd  = "`"$Ps64`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$Self`" -UiOnly"
 
-# C#: enumerar sessões + lançar em cada uma (namespace novo para evitar conflito)
+# C# para lançar nas sessões (namespace novo p/ evitar conflitos)
 $source = @"
 using System;
 using System.Linq;
@@ -224,7 +244,7 @@ namespace XLaunch.V2 {
     }
 
     public static bool LaunchWithExplorerToken(int pid, string cmd){
-      IntPtr hp = OpenProcess(0x1000|0x0400,false,pid); // QUERY_LIMITED_INFORMATION | QUERY_INFORMATION
+      IntPtr hp = OpenProcess(0x1000|0x0400,false,pid);
       if(hp==IntPtr.Zero) return false;
       IntPtr ht; bool ok = OpenProcessToken(hp, TOKEN_ASSIGN_PRIMARY|TOKEN_QUERY, out ht);
       CloseHandle(hp); if(!ok) return false;
@@ -249,15 +269,13 @@ namespace XLaunch.V2 {
   }
 }
 "@
-# Compila apenas se ainda não existir
+
 if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType('XLaunch.V2.Native', $false) } | Where-Object { $_ })) {
   Add-Type -TypeDefinition $source -Language CSharp
 }
 
-# Inicia TermService para WTS fallback
 try { Start-Service -Name TermService -ErrorAction SilentlyContinue | Out-Null } catch {}
 
-# Coleta sessões: corrige retorno em tupla
 $wtsTuples = [XLaunch.V2.Native]::EnumerateSessions()
 $wts = foreach($s in $wtsTuples){ if ($s) { [uint32]$s.Item1 } }
 $exp = [XLaunch.V2.Native]::ExplorerSessions()
@@ -265,7 +283,6 @@ $sessions = ($wts + $exp) | Sort-Object -Unique
 
 $ok=@(); $fail=@()
 foreach($sid in $sessions){
-  # Tenta com token do Explorer da própria sessão
   $expPid = (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid } | Select-Object -First 1).Id
   $launched = $false
   if ($expPid) { $launched = [XLaunch.V2.Native]::LaunchWithExplorerToken($expPid, $cmd) }
@@ -276,7 +293,6 @@ foreach($sid in $sessions){
 Write-Host ("Sessões: {0} | Sucesso: {1} | Falha: {2}" -f $sessions.Count, $ok.Count, $fail.Count)
 if ($fail.Count) { Write-Warning ("Falhas: " + ($fail -join ',')) }
 
-# Se não abriu em ninguém, grava um marcador
 if (($ok.Count -eq 0) -and -not (Test-Path -LiteralPath $AnswerFile)) {
   try { [IO.File]::WriteAllText($AnswerFile,'NOUSER',[Text.Encoding]::UTF8) } catch {}
 }
