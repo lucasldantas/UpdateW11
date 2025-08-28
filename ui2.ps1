@@ -6,7 +6,7 @@ $Txt_WindowTitle          = 'Agendar Execução'
 $Txt_HeaderTitle          = 'Atualização Obrigatória'
 $Txt_HeaderSubtitle       = 'Chegou a hora agendada. A execução é obrigatória.'
 $Txt_ActionLabel          = 'Ação:'
-$Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11. `nApós iniciar o computador não pode ser desligado.'
+$Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11'
 $Txt_ActionLine2          = 'Tempo Estimado: 20 a 30 minutos'
 $Txt_BtnNow               = 'Executar agora'
 
