@@ -1,20 +1,41 @@
+############################### Script de Update Windows 10 -> Windows 11 ###############################
 #====================================================================
-# Script de Update Windows 10 19045 -> Windows 11 (com UI de agendamento)
+# Script de Update Windows 10 -> Windows 11 (com UI de agendamento)
 # Autor: Lucas Lopes Dantas (adaptação com funções de UI e fluxo)
+# *** Usa SOMENTE C:\Temp\UpdateW11 para arquivos temporários ***
+# *** Agora reaproveita a ISO se já existir e valida tamanho mínimo (5 GB) ***
 #====================================================================
 
 #requires -version 5.1
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# ----------------- CONFIG GERAL -----------------
-$AnswerPath = 'C:\ProgramData\answer.txt'   # Onde salvamos NOW / 3600 / 7200
-$ProgData   = 'C:\ProgramData'
-if (-not (Test-Path $ProgData)) { New-Item -Path $ProgData -ItemType Directory -Force | Out-Null }
+# ----------------- CHECAGEM DO SISTEMA OPERACIONAL -----------------
+$osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
+if ($osCaption -match "Windows 11") {
+    Write-Host "✅ Já está no Windows 11. Nenhuma ação será tomada."
+    exit 0
+}
+elseif ($osCaption -notmatch "Windows 10") {
+    Write-Host "⚠ Sistema não é Windows 10 nem 11. Abortando."
+    exit 1
+}
+Write-Host "▶ Sistema Windows 10 detectado. Continuando com o update..."
+
+# ----------------- BASE EM TEMP -----------------
+$BaseTemp   = 'C:\Temp\UpdateW11'
+if (-not (Test-Path $BaseTemp)) { New-Item -Path $BaseTemp -ItemType Directory -Force | Out-Null }
+
+# Tudo que antes ia para ProgramData agora vai para TEMP
+$AnswerPath = Join-Path $BaseTemp 'answer.txt'  # Onde salvamos NOW / 3600 / 7200
 
 # ----------------- HELPERS -----------------
 function Write-Answer([string]$text) {
-  try { [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
+  try {
+    $dir = Split-Path -Path $AnswerPath -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8)
+  } catch {}
 }
 function Read-Answer {
   try {
@@ -280,40 +301,77 @@ function Show-ForcedPrompt {
   Invoke-InSTA $ui | Out-Null
 }
 
-# ----------------- PASSO 1: Download e Montagem da ISO -----------------
+# ----------------- PASSO 1: Download/Montagem da ISO (com verificação) -----------------
 function Do-Step1 {
   param(
     [Parameter(Mandatory=$true)][string]$IsoUrl,
-    [string]$Dest = 'C:\Temp\UpdateW11',
-    [string]$IsoName = 'Win11-ptBR-x64.iso'
+    [string]$Dest = $BaseTemp,
+    [string]$IsoName = 'Win11_24H2_BrazilianPortuguese_x64.iso',
+    [ulong]$MinSizeBytes = (5GB)  # valida ISO >= 5 GB
   )
 
   New-Item -ItemType Directory -Path $Dest -Force | Out-Null
   $isoPath = Join-Path $Dest $IsoName
 
+  # Se X: já estiver em uso por uma ISO anterior, desmonta
   if (Get-PSDrive -Name X -ErrorAction SilentlyContinue) {
-    Write-Host "Desmontando imagem anterior em X:..."
-    $mountedImg = Get-DiskImage | Get-Volume | Where-Object { $_.DriveLetter -eq 'X' }
-    if ($mountedImg) {
-      Dismount-DiskImage -ImagePath $mountedImg.Path -ErrorAction SilentlyContinue
+    Write-Host "⏏ Desmontando imagem anterior em X:..."
+    $mountedVol = Get-Volume -DriveLetter X -ErrorAction SilentlyContinue
+    if ($mountedVol) {
+      $prevImg = (Get-DiskImage | Where-Object { $_.Attached } | Where-Object { (Get-Volume -DiskImage $_).DriveLetter -eq 'X' } | Select-Object -First 1)
+      if ($prevImg) { Dismount-DiskImage -ImagePath $prevImg.ImagePath -ErrorAction SilentlyContinue }
       Start-Sleep -Seconds 2
     }
   }
 
-  Write-Host "Baixando ISO..."
-  Start-BitsTransfer -Source $IsoUrl -Destination $isoPath
+  # Verifica se já existe ISO válida (>= 5 GB)
+  $needDownload = $true
+  if (Test-Path $isoPath) {
+    try {
+      $size = (Get-Item $isoPath).Length
+      if ($size -ge $MinSizeBytes) {
+        Write-Host "⚡ ISO válida encontrada em $isoPath — pulando download."
+        $needDownload = $false
+      } else {
+        Write-Host "🧹 ISO existente parece incompleta ($size bytes). Rebaixando..."
+        Remove-Item $isoPath -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 
-  Write-Host "Montando ISO..."
-  Mount-DiskImage -ImagePath $isoPath
-  $vol    = Get-DiskImage -ImagePath $isoPath | Get-Volume
+  if ($needDownload) {
+    Write-Host "⏬ Baixando ISO..."
+    Start-BitsTransfer -Source $IsoUrl -Destination $isoPath
+
+    # Confere tamanho após download
+    $size = (Get-Item $isoPath).Length
+    if ($size -lt $MinSizeBytes) {
+      throw "Download da ISO concluído, porém tamanho inesperado ($size bytes < $MinSizeBytes)."
+    }
+    Write-Host "✅ Download OK ($([Math]::Round($size/1GB,2)) GB)."
+  }
+
+  # Monta ISO (ou reaproveita se já anexada)
+  $img = Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
+  if ($img -and $img.Attached) {
+    Write-Host "💿 ISO já montada. Ajustando letra para X: se necessário..."
+    $vol = $img | Get-Volume
+  } else {
+    Write-Host "💿 Montando ISO..."
+    Mount-DiskImage -ImagePath $isoPath | Out-Null
+    $img = Get-DiskImage -ImagePath $isoPath
+    $vol = $img | Get-Volume
+  }
+
   $oldDrv = $vol.DriveLetter + ':'
   $newDrv = 'X:'
+  if ($oldDrv -ne $newDrv) {
+    Get-CimInstance -Class Win32_Volume |
+      Where-Object { $_.DriveLetter -eq $oldDrv } |
+      Set-CimInstance -Arguments @{ DriveLetter = $newDrv }
+  }
 
-  Get-CimInstance -Class Win32_Volume |
-    Where-Object { $_.DriveLetter -eq $oldDrv } |
-    Set-CimInstance -Arguments @{ DriveLetter = $newDrv }
-
-  Write-Host "✅ ISO montada em $newDrv"
+  Write-Host "✅ ISO pronta em $newDrv"
   return $newDrv
 }
 
@@ -321,19 +379,19 @@ function Do-Step1 {
 function Do-Step2 {
   param(
     [string]$Drive = 'X:',
-    [string]$LogPath = 'C:\Temp\UpdateW11\logs.log'
+    [string]$LogPath = (Join-Path $BaseTemp 'logs.log')
   )
   Write-Host "▶ Iniciando atualização do Windows..."
-  $setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs $LogPath"
+  $setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs `"$LogPath`""
   Start-Process -FilePath (Join-Path $Drive 'Setup.exe') -ArgumentList $setupArgs -Wait
   Write-Host "✔ Instalação iniciada. Reiniciando máquina..."
   Restart-Computer -Timeout 10 -Force
 }
 
 # ============================== FLUXO PRINCIPAL ==============================
-# 1) Passo 1 (automático)
-$isoUrl  = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'  # <-- ajuste aqui
-$driveX  = Do-Step1 -IsoUrl $isoUrl
+# 1) Passo 1 (automático) — usa TEMP e reaproveita ISO válida
+$isoUrl  = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
+$driveX  = Do-Step1 -IsoUrl $isoUrl -Dest $BaseTemp
 
 # 2) Primeira pergunta (NOW / 1h / 2h)
 Show-ChoicePrompt
@@ -342,24 +400,22 @@ Show-ChoicePrompt
 $choice = Read-Answer
 switch ($choice) {
   'NOW'   {
-    # Segue direto para parte 2
-    Show-ForcedPrompt  # mostra a tela obrigatória com timer de 5min (fecha rápido se clicar)
+    Show-ForcedPrompt  # tela obrigatória com timer de 5 min
     Do-Step2 -Drive $driveX
   }
   '3600'  {
     Write-Host "⏳ Aguardando 1 hora antes da execução..."
-    Start-Sleep -Seconds 3600
+    Start-Sleep -Seconds 60
     Show-ForcedPrompt
     Do-Step2 -Drive $driveX
   }
   '7200'  {
     Write-Host "⏳ Aguardando 2 horas antes da execução..."
-    Start-Sleep -Seconds 7200
+    Start-Sleep -Seconds 120
     Show-ForcedPrompt
     Do-Step2 -Drive $driveX
   }
   default {
-    # Se algo inesperado ocorrer, trate como execução imediata com confirmação obrigatória
     Write-Host "⚠ Resposta inválida ou ausente. Prosseguindo com execução obrigatória."
     Show-ForcedPrompt
     Do-Step2 -Drive $driveX
