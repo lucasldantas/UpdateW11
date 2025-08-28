@@ -129,18 +129,29 @@ $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[S
 $window.add_Closing($script:closingHandler)
 function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-# -------- Eventos usando Register-ObjectEvent (robusto para iex) --------
-$e1 = Register-ObjectEvent -InputObject $BtnNow    -EventName Click -Action { Save-Answer 'Executar agora'; Allow-Close $window; $window.Close() }
-$e2 = Register-ObjectEvent -InputObject $BtnDelay1 -EventName Click -Action { Save-Answer 'Adiar 1 hora';   Allow-Close $window; $window.Close() }
-$e3 = Register-ObjectEvent -InputObject $BtnDelay2 -EventName Click -Action { Save-Answer 'Adiar 2 horas';  Allow-Close $window; $window.Close() }
-
-try {
-  $null = $window.ShowDialog()
-} finally {
-  # limpa subscrição de eventos
-  foreach($ev in @($e1,$e2,$e3)) {
-    try { if ($ev) { Unregister-Event -SourceIdentifier $ev.Name -ErrorAction SilentlyContinue } } catch {}
-  }
-  Remove-Job -State Completed -ErrorAction SilentlyContinue | Out-Null
+# -------- Eventos (UI thread com Add_Click) --------
+$handlerNow = [System.Windows.RoutedEventHandler]{
+  param($s,$e)
+  Save-Answer 'Executar agora'
+  Allow-Close $window
+  $window.Close()
+}
+$handlerD1 = [System.Windows.RoutedEventHandler]{
+  param($s,$e)
+  Save-Answer 'Adiar 1 hora'
+  Allow-Close $window
+  $window.Close()
+}
+$handlerD2 = [System.Windows.RoutedEventHandler]{
+  param($s,$e)
+  Save-Answer 'Adiar 2 horas'
+  Allow-Close $window
+  $window.Close()
 }
 
+$BtnNow.add_Click($handlerNow)
+$BtnDelay1.add_Click($handlerD1)
+$BtnDelay2.add_Click($handlerD2)
+
+# Mostrar
+$null = $window.ShowDialog()
