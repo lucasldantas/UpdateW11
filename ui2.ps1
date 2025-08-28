@@ -9,6 +9,9 @@ $Txt_ActionLabel          = 'Ação:'
 $Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11'
 $Txt_ActionLine2          = 'Tempo Estimado: 20 a 30 minutos'
 $Txt_BtnNow               = 'Executar agora'
+
+# ====== TIMER (5 minutos) ======
+$TotalSeconds = 300  # 5 minutos
 # ==========================================================
 
 # ---------- Garantir STA ----------
@@ -36,7 +39,7 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="$Txt_WindowTitle"
-        Width="520" MinHeight="250" SizeToContent="Height"
+        Width="560" MinHeight="300" SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize" Background="#0f172a"
         WindowStyle="None" ShowInTaskbar="True">
@@ -60,15 +63,37 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
     <!-- Corpo -->
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
-      <StackPanel>
-        <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
-        <TextBlock Text="$Txt_ActionLine1"
-                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
-                   Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
-        <TextBlock Text="$Txt_ActionLine2"
-                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
-                   Background="#0b1220" TextWrapping="Wrap"/>
-      </StackPanel>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="220"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Descrição -->
+        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+          <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
+          <TextBlock Text="$Txt_ActionLine1"
+                     Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
+                     Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
+          <TextBlock Text="$Txt_ActionLine2"
+                     Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
+                     Background="#0b1220" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <!-- Timer (contagem + progresso) -->
+        <Border Grid.Column="1" Background="#0f172a" CornerRadius="12" Padding="12">
+          <StackPanel>
+            <TextBlock Text="Início automático em:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="12" />
+            <TextBlock Name="LblCountdown" Text="05:00" Foreground="#e5e7eb" FontFamily="Segoe UI"
+                       FontWeight="Bold" FontSize="28" Margin="0,4,0,10" HorizontalAlignment="Center"/>
+            <ProgressBar Name="PbCountdown" Minimum="0" Maximum="$TotalSeconds" Height="16"
+                         Foreground="#22c55e" Background="#1f2937" BorderBrush="#111827"
+                         Value="0" />
+            <TextBlock Text="Se nada for escolhido, será executado automaticamente."
+                       Foreground="#94a3b8" FontFamily="Segoe UI" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+        </Border>
+      </Grid>
     </Border>
 
     <!-- Botão único -->
@@ -88,7 +113,7 @@ $reader  = New-Object System.Xml.XmlNodeReader $xaml
 $window  = [Windows.Markup.XamlReader]::Load($reader)
 if (-not $window) { throw "Falha ao carregar a UI a partir do XAML." }
 
-# Garantir foco
+# Garantir foco/topmost
 $window.Topmost = $true
 $window.Add_Loaded({
   try { $this.Activate() | Out-Null; $this.BringIntoView() | Out-Null } catch {}
@@ -106,15 +131,55 @@ $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[S
 $window.add_Closing($script:closingHandler)
 function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-# Handler único
-$BtnNow = $window.FindName('BtnNow')
-$handlerNow = [System.Windows.RoutedEventHandler]{
-  param($s,$e)
+# ====== Controles ======
+$BtnNow       = $window.FindName('BtnNow')
+$LblCountdown = $window.FindName('LblCountdown')
+$PbCountdown  = $window.FindName('PbCountdown')
+
+# ====== Execução única (click ou timeout) ======
+$script:done = $false
+function Execute-Now {
+  if ($script:done) { return }
+  $script:done = $true
+  try { $timer.Stop() } catch {}
   Save-Answer 'Executar agora'
   Allow-Close $window
   $window.Close()
 }
-$BtnNow.add_Click($handlerNow)
+
+# Botão/Enter disparam execução
+$BtnNow.add_Click({ Execute-Now })
+$window.Add_KeyDown({
+  if ($_.Key -eq 'Enter') { Execute-Now }
+})
+
+# ====== Timer (DispatcherTimer 1s) ======
+$script:remaining = $TotalSeconds
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromSeconds(1)
+
+$updateUi = {
+  # Atualiza texto mm:ss e progresso
+  $mm = [Math]::Floor($script:remaining / 60)
+  $ss = $script:remaining % 60
+  $LblCountdown.Text = ('{0:00}:{1:00}' -f $mm, $ss)
+  $PbCountdown.Value = $TotalSeconds - $script:remaining
+}
+
+# Primeira pintura
+& $updateUi
+
+$timer.Add_Tick({
+  if ($script:remaining -le 0) {
+    # Timeout => executar automaticamente
+    Execute-Now
+    return
+  }
+  $script:remaining--
+  & $updateUi
+})
+
+$timer.Start()
 
 # Mostrar
 $null = $window.ShowDialog()
