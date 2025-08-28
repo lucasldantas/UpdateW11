@@ -36,8 +36,16 @@ else {
 $BaseTemp   = 'C:\Temp\UpdateW11'
 if (-not (Test-Path $BaseTemp)) { New-Item -Path $BaseTemp -ItemType Directory -Force | Out-Null }
 
-# Tudo que antes ia para ProgramData agora vai para TEMP
 $AnswerPath = Join-Path $BaseTemp 'answer.txt'  # Onde salvamos NOW / 3600 / 7200
+$UiLogPath  = Join-Path $BaseTemp 'ui.log'
+
+# ----------------- LOG SIMPLES -----------------
+function Write-UiLog([string]$msg) {
+  try {
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -Path $UiLogPath -Value "[$ts] $msg"
+  } catch {}
+}
 
 # ----------------- HELPERS -----------------
 function Write-Answer([string]$text) {
@@ -45,12 +53,15 @@ function Write-Answer([string]$text) {
     $dir = Split-Path -Path $AnswerPath -Parent
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8)
+    Write-UiLog "Write-Answer: $text"
   } catch {}
 }
 function Read-Answer {
   try {
     if (Test-Path $AnswerPath) {
-      return ([IO.File]::ReadAllText($AnswerPath,[Text.Encoding]::UTF8)).Trim()
+      $v = ([IO.File]::ReadAllText($AnswerPath,[Text.Encoding]::UTF8)).Trim()
+      if ($v) { Write-UiLog "Read-Answer: $v" }
+      return $v
     }
   } catch {}
   return $null
@@ -62,6 +73,7 @@ function Invoke-InSTA([ScriptBlock]$ScriptToRun) {
   if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     $tmp = [IO.Path]::GetTempFileName().Replace(".tmp",".ps1")
     [IO.File]::WriteAllText($tmp, $ScriptToRun.ToString(), [Text.Encoding]::UTF8)
+    Write-UiLog "Invoke-InSTA: relaunching in -STA ($tmp)"
     Start-Process -FilePath $PsExeFull -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $tmp) -Wait | Out-Null
     Remove-Item $tmp -ErrorAction SilentlyContinue
     return $true
@@ -317,14 +329,15 @@ function Get-ActiveLogon {
   $quser = (& quser 2>$null)
 
   if ($quser) {
-    # Normaliza espaços e separa linhas; aceita "Active" (EN) e "Ativo" (PT-BR)
+    # aceita "Active" (EN) e "Ativo" (PT-BR)
     $lines = $quser -split "`r?`n" | Where-Object { $_ -match '\s+(Active|Ativo)\s' }
     if ($lines) {
       $line = $lines | Select-Object -First 1
 
-      # Quser tipicamente: USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON TIME
-      # Captura o primeiro token (user) e o primeiro número inteiro (ID)
+      # Remove ">" (sessão atual às vezes aparece com ">")
       $parts = ($line -replace '^\s*>\s*','') -split '\s+'
+
+      # USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON TIME
       $userToken = $parts[0]
       $idToken   = ($parts | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
 
@@ -362,15 +375,16 @@ function Get-ActiveLogon {
   return [pscustomobject]$result
 }
 
-
 # ----------------- EXECUTAR UI NA SESSÃO ATIVA VIA TAREFA -----------------
 function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
   $info = Get-ActiveLogon
   if (-not $info.UserDomain) {
     Write-Host "⚠ Nenhum usuário ativo encontrado. Não será possível exibir UI." -ForegroundColor Yellow
+    Write-UiLog "Start-UiInActiveSession: nenhum usuário ativo"
     return $false
   }
   Write-Host "👤 Usuário ativo: $($info.UserDomain)  (SID=$($info.SID))  SessãoID=$($info.SessionId)"
+  Write-UiLog "Usuário ativo: $($info.UserDomain) | SID=$($info.SID) | SessãoID=$($info.SessionId)"
 
   $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
   $tmpXml   = Join-Path $BaseTemp "ui_$([guid]::NewGuid()).xml"
@@ -381,11 +395,12 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
     $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
     $self = $MyInvocation.MyCommand.Definition
     [IO.File]::WriteAllText($psPath, $self, [Text.Encoding]::UTF8)
+    Write-UiLog "PSCommandPath inexistente; script salvo em $psPath"
   }
 
   $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
 
-  # Use o PowerShell "cheio" para evitar PATH issues no Agendador
+  # Caminho completo do PowerShell
   $psExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
   $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"
 
@@ -437,7 +452,9 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
 
   try {
     schtasks /Create /TN $taskName /XML $tmpXml /F | Out-Null
+    Write-UiLog "Tarefa criada: $taskName"
   } catch {
+    Write-UiLog "Falha ao criar tarefa: $($_.Exception.Message)"
     Write-Host "❌ Falha ao criar tarefa para UI: $($_.Exception.Message)" -ForegroundColor Red
     return $false
   } finally {
@@ -447,6 +464,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   # Limpa resposta anterior e dispara a UI
   Remove-Item $AnswerPath -ErrorAction SilentlyContinue
   schtasks /Run /TN $taskName | Out-Null
+  Write-UiLog "Tarefa executada: $taskName"
 
   # Espera até o usuário responder ou até expirar Timeout
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -458,6 +476,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
 
   # Apaga a tarefa
   schtasks /Delete /TN $taskName /F | Out-Null
+  Write-UiLog "Tarefa deletada: $taskName"
 
   return [bool](Read-Answer)
 }
@@ -532,6 +551,7 @@ function Do-Step1 {
       Set-CimInstance -Arguments @{ DriveLetter = $newDrv }
   }
 
+  Write-UiLog "ISO pronta em $newDrv (path=$isoPath)"
   Write-Host "✅ ISO pronta em $newDrv"
   return $newDrv
 }
@@ -543,19 +563,25 @@ function Do-Step2 {
     [string]$LogPath = (Join-Path $BaseTemp 'logs.log')
   )
   Write-Host "▶ Iniciando atualização do Windows..."
+  Write-UiLog "Start-Process Setup.exe ($Drive)"
   $setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs `"$LogPath`""
   Start-Process -FilePath (Join-Path $Drive 'Setup.exe') -ArgumentList $setupArgs -Wait
   Write-Host "✔ Instalação iniciada. Reiniciando máquina..."
+  Write-UiLog "Restart-Computer em 10s"
   Restart-Computer -Timeout 10 -Force
 }
 
 # ============================== ROTINAS CHAMADAS PELAS TAREFAS ==============================
 if ($ShowPromptOnly) {
+  Write-UiLog "ShowPromptOnly iniciado"
   Show-ChoicePrompt
+  Write-UiLog "ShowPromptOnly finalizado"
   exit 0
 }
 if ($ShowForcedOnly) {
+  Write-UiLog "ShowForcedOnly iniciado"
   Show-ForcedPrompt
+  Write-UiLog "ShowForcedOnly finalizado"
   exit 0
 }
 
@@ -569,6 +595,7 @@ Remove-Item $AnswerPath -ErrorAction SilentlyContinue
 $shown = Start-UiInActiveSession -Mode 'choice' -TimeoutSec 1800  # espera até 30 min pela resposta
 if (-not $shown) {
   Write-Host "⚠ Não foi possível exibir a UI ao usuário atual. Prosseguindo com execução obrigatória."
+  Write-UiLog "Falha ao exibir UI inicial; fallback NOW"
   Write-Answer 'NOW'
 }
 
@@ -576,13 +603,13 @@ if (-not $shown) {
 $choice = Read-Answer
 switch ($choice) {
   'NOW'   {
-    # Tela obrigatória (countdown) na sessão do usuário
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
     Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   '3600'  {
     Write-Host "⏳ Aguardando 1 hora antes da execução..."
+    Write-UiLog "Delay 3600s"
     Start-Sleep -Seconds 60
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
     Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
@@ -590,6 +617,7 @@ switch ($choice) {
   }
   '7200'  {
     Write-Host "⏳ Aguardando 2 horas antes da execução..."
+    Write-UiLog "Delay 7200s"
     Start-Sleep -Seconds 120
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
     Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
@@ -597,6 +625,7 @@ switch ($choice) {
   }
   default {
     Write-Host "⚠ Resposta inválida ou ausente. Prosseguindo com execução obrigatória."
+    Write-UiLog "Resposta inválida/ausente; executando NOW"
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
     Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
