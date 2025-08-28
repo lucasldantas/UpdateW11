@@ -307,7 +307,7 @@ function Do-Step1 {
     [Parameter(Mandatory=$true)][string]$IsoUrl,
     [string]$Dest = $BaseTemp,
     [string]$IsoName = 'Win11_24H2_BrazilianPortuguese_x64.iso',
-    [ulong]$MinSizeBytes = (5GB)  # valida ISO >= 5 GB
+    [UInt64]$MinSizeBytes = 5GB  # valida ISO >= 5 GB
   )
 
   New-Item -ItemType Directory -Path $Dest -Force | Out-Null
