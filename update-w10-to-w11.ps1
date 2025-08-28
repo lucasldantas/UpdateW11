@@ -1,10 +1,9 @@
 ############################### Script de Update Windows 10 -> Windows 11 ###############################
 #====================================================================
-# Script de Update Windows 10 -> Windows 11 (com UI de agendamento)
-# *** Usa SOMENTE C:\Temp\UpdateW11 ***
-# *** Reaproveita ISO (>=5GB), monta preferencialmente em X: ***
-# *** UI aparece no usuário ATUAL via schtasks /RU <DOMÍNIO\USUÁRIO> /IT ***
-# *** Tarefa roda em -STA e registra stdout/stderr em ui_task.log ***
+# Atualização com UI (agendamento/contagem), ISO reaproveitada (>=5GB),
+# montagem preferencial em X:, UI na sessão do usuário atual via schtasks
+# com wrapper .CMD para garantir quotes/redirecionamento corretos.
+# Logs: C:\Temp\UpdateW11\ui.log  e  C:\Temp\UpdateW11\ui_task.log
 #====================================================================
 
 #requires -version 5.1
@@ -34,7 +33,7 @@ if ($osCaption -match "Windows 11") {
 $BaseTemp   = 'C:\Temp\UpdateW11'
 if (-not (Test-Path $BaseTemp)) { New-Item -Path $BaseTemp -ItemType Directory -Force | Out-Null }
 
-$AnswerPath = Join-Path $BaseTemp 'answer.txt'    # NOW / 3600 / 7200
+$AnswerPath = Join-Path $BaseTemp 'answer.txt'         # NOW / 3600 / 7200
 $UiLogPath  = Join-Path $BaseTemp 'ui.log'
 $TaskLog    = Join-Path $BaseTemp 'ui_task.log'
 
@@ -336,7 +335,7 @@ function Get-ActiveLogon {
   return [pscustomobject]$result
 }
 
-# ----------------- EXECUTAR UI NA SESSÃO ATIVA (sem XML, /RL LIMITED, /IT, -STA, log) -----------------
+# ----------------- EXECUTAR UI NA SESSÃO ATIVA (com wrapper .CMD) -----------------
 function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
   $info = Get-ActiveLogon
   if (-not $info.User -or -not $info.EffectiveDomain) {
@@ -351,7 +350,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
 
   $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
 
-  # Garante que o script físico exista quando rodou via IEX
+  # Garante script físico quando rodou via IEX
   $psPath = $PSCommandPath
   if (-not $psPath) {
     $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
@@ -363,18 +362,22 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
   $psExe     = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-  # Wrapper em CMD: roda em -STA e registra stdout/stderr em ui_task.log; mantém janela 5s se erro
-  $cmdWrapper = @"
-cmd /c ""$psExe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Normal -File `"$psPath`" $argSwitch ^>^> `"$TaskLog`" 2^>^&1 || (echo ERROR LEVEL %%errorlevel%% ^>^> `"$TaskLog`" & timeout /t 5)""
-"@.Trim()
+  # Cria um wrapper .CMD para evitar problemas de aspas/escapes no /TR
+  $wrapperPath = Join-Path $BaseTemp ("launch_ui_{0}.cmd" -f $Mode)
+  $wrapper = @(
+    '@echo off'
+    'setlocal'
+    ('"{0}" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Normal -File "{1}" {2} >> "{3}" 2>>&1' -f $psExe, $psPath, $argSwitch, $TaskLog)
+  ) -join "`r`n"
+  [IO.File]::WriteAllText($wrapperPath, $wrapper, [Text.Encoding]::ASCII)
 
-  # /SC ONCE precisa de horário futuro: agora + 2min
+  # /SC ONCE pede horário futuro: agora +2 min
   $startTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
 
   $createCmd = @(
     '/Create','/TN', $taskName,
     '/SC','ONCE','/ST', $startTime,
-    '/TR', $cmdWrapper,
+    '/TR', "`"$wrapperPath`"",
     '/RL','LIMITED',   # evita desktop elevado/UAC
     '/RU', $ru,
     '/IT',
@@ -383,7 +386,7 @@ cmd /c ""$psExe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Normal -Fil
 
   try {
     schtasks @createCmd | Out-Null
-    Write-UiLog "Tarefa criada: $taskName | RU=$ru | ST=$startTime"
+    Write-UiLog "Tarefa criada: $taskName | RU=$ru | ST=$startTime | TR=$wrapperPath"
   } catch {
     Write-UiLog "Falha ao criar tarefa: $($_.Exception.Message)"
     Write-Host "❌ Falha ao criar tarefa para UI: $($_.Exception.Message)" -ForegroundColor Red
