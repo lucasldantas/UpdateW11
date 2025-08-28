@@ -2,7 +2,7 @@
 #====================================================================
 # Script de Update Windows 10 -> Windows 11 (com UI de agendamento)
 # *** Usa SOMENTE C:\Temp\UpdateW11 ***
-# *** Reaproveita ISO (>=5GB), monta em X: ***
+# *** Reaproveita ISO (>=5GB), monta preferencialmente em X: ***
 # *** UI aparece no usuário ATUAL via schtasks /RU <DOMÍNIO\USUÁRIO> /IT ***
 #====================================================================
 
@@ -65,12 +65,15 @@ function Read-Answer {
 }
 
 function Invoke-InSTA([ScriptBlock]$ScriptToRun) {
+  # Garante STA; mostra janela (WindowStyle Normal)
   $PsExeFull = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
   if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     $tmp = [IO.Path]::GetTempFileName().Replace(".tmp",".ps1")
     [IO.File]::WriteAllText($tmp, $ScriptToRun.ToString(), [Text.Encoding]::UTF8)
     Write-UiLog "Invoke-InSTA: relaunching in -STA ($tmp)"
-    Start-Process -FilePath $PsExeFull -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $tmp) -Wait | Out-Null
+    Start-Process -FilePath $PsExeFull -ArgumentList @(
+      '-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Normal','-File', $tmp
+    ) -Wait | Out-Null
     Remove-Item $tmp -ErrorAction SilentlyContinue
     return $true
   } else {
@@ -351,9 +354,9 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
 
   $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
   $psExe     = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"
+  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"  # sem -WindowStyle Hidden
 
-  # Para evitar erro de horário inválido do /SC ONCE, usa hora +2 minutos
+  # /SC ONCE precisa de horário válido; usa agora + 2min
   $startTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
 
   $createCmd = @(
@@ -386,8 +389,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
-    $ans = Read-Answer
-    if ($ans) { break }
+    if (Read-Answer) { break }
   }
 
   schtasks /Delete /TN $taskName /F | Out-Null
@@ -396,7 +398,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   return [bool](Read-Answer)
 }
 
-# ----------------- PASSO 1: Download/Montagem da ISO -----------------
+# ----------------- PASSO 1: Download/Montagem da ISO (corrigido) -----------------
 function Do-Step1 {
   param(
     [Parameter(Mandatory=$true)][string]$IsoUrl,
@@ -408,16 +410,17 @@ function Do-Step1 {
   New-Item -ItemType Directory -Path $Dest -Force | Out-Null
   $isoPath = Join-Path $Dest $IsoName
 
-  if (Get-PSDrive -Name X -ErrorAction SilentlyContinue) {
-    Write-Host "⏏ Desmontando imagem anterior em X:..."
-    $mountedVol = Get-Volume -DriveLetter X -ErrorAction SilentlyContinue
-    if ($mountedVol) {
-      $prevImg = (Get-DiskImage | Where-Object { $_.Attached } | Where-Object { (Get-Volume -DiskImage $_).DriveLetter -eq 'X' } | Select-Object -First 1)
-      if ($prevImg) { Dismount-DiskImage -ImagePath $prevImg.ImagePath -ErrorAction SilentlyContinue }
+  # 0) Se nossa ISO já estiver montada, desmonta (sempre com -ImagePath)
+  try {
+    $imgMine = Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
+    if ($imgMine -and $imgMine.Attached) {
+      Write-Host "⏏ Desmontando ISO anterior deste script..."
+      Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
       Start-Sleep -Seconds 2
     }
-  }
+  } catch {}
 
+  # 1) Verifica/baixa ISO
   $needDownload = $true
   if (Test-Path $isoPath) {
     try {
@@ -440,26 +443,39 @@ function Do-Step1 {
     Write-Host "✅ Download OK ($([Math]::Round($size/1GB,2)) GB)."
   }
 
-  $img = Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
-  if ($img -and $img.Attached) {
-    Write-Host "💿 ISO já montada. Ajustando letra para X: se necessário..."
-    $vol = $img | Get-Volume
-  } else {
-    Write-Host "💿 Montando ISO..."
-    Mount-DiskImage -ImagePath $isoPath | Out-Null
-    $img = Get-DiskImage -ImagePath $isoPath
-    $vol = $img | Get-Volume
+  # 2) Se X: estiver ocupado por OUTRA coisa, tenta liberar a letra
+  $volX = Get-Volume -DriveLetter X -ErrorAction SilentlyContinue
+  if ($volX) {
+    try {
+      Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='X:'" |
+        Set-CimInstance -Property @{ DriveLetter = $null } -ErrorAction SilentlyContinue | Out-Null
+      Start-Sleep -Seconds 1
+    } catch {}
   }
 
-  $oldDrv = $vol.DriveLetter + ':'
-  $newDrv = 'X:'
-  if ($oldDrv -ne $newDrv) {
-    Get-CimInstance -Class Win32_Volume | Where-Object { $_.DriveLetter -eq $oldDrv } | Set-CimInstance -Arguments @{ DriveLetter = $newDrv }
+  # 3) Monta nossa ISO
+  Write-Host "💿 Montando ISO..."
+  Mount-DiskImage -ImagePath $isoPath | Out-Null
+
+  # 4) Descobre a letra e tenta ajustar para X:
+  $img = Get-DiskImage -ImagePath $isoPath
+  $vol = $img | Get-Volume
+  $assigned = $vol.DriveLetter + ':'
+
+  if ($assigned -ne 'X:') {
+    try {
+      Get-CimInstance -Class Win32_Volume |
+        Where-Object { $_.DriveLetter -eq $assigned } |
+        Set-CimInstance -Property @{ DriveLetter = 'X:' } -ErrorAction Stop | Out-Null
+      $assigned = 'X:'
+    } catch {
+      Write-Host "ℹ Não foi possível usar X:. Usando $assigned."
+    }
   }
 
-  Write-UiLog "ISO pronta em $newDrv (path=$isoPath)"
-  Write-Host "✅ ISO pronta em $newDrv"
-  return $newDrv
+  Write-UiLog "ISO pronta em $assigned (path=$isoPath)"
+  Write-Host "✅ ISO pronta em $assigned"
+  return $assigned
 }
 
 # ----------------- PASSO 2: Setup.exe -----------------
