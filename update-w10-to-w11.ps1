@@ -3,10 +3,16 @@
 # Script de Update Windows 10 -> Windows 11 (com UI de agendamento)
 # Autor: Lucas Lopes Dantas (adaptação com funções de UI e fluxo)
 # *** Usa SOMENTE C:\Temp\UpdateW11 para arquivos temporários ***
-# *** Agora reaproveita a ISO se já existir e valida tamanho mínimo (5 GB) ***
+# *** Reaproveita ISO se já existir e valida tamanho mínimo (5 GB) ***
+# *** Garante que a UI aparece no USUÁRIO ATUAL via Tarefa Interativa ***
 #====================================================================
 
 #requires -version 5.1
+param(
+  [switch]$ShowPromptOnly,  # usado pela tarefa para abrir SOMENTE a primeira UI
+  [switch]$ShowForcedOnly   # usado pela tarefa para abrir SOMENTE a UI obrigatória (countdown)
+)
+
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
@@ -14,13 +20,17 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
 if ($osCaption -match "Windows 11") {
     Write-Host "✅ Já está no Windows 11. Nenhuma ação será tomada."
-    exit 0
+    if (-not ($ShowPromptOnly -or $ShowForcedOnly)) { exit 0 }
 }
 elseif ($osCaption -notmatch "Windows 10") {
     Write-Host "⚠ Sistema não é Windows 10 nem 11. Abortando."
-    exit 1
+    if (-not ($ShowPromptOnly -or $ShowForcedOnly)) { exit 1 }
 }
-Write-Host "▶ Sistema Windows 10 detectado. Continuando com o update..."
+else {
+    if (-not ($ShowPromptOnly -or $ShowForcedOnly)) {
+      Write-Host "▶ Sistema Windows 10 detectado. Continuando com o update..."
+    }
+}
 
 # ----------------- BASE EM TEMP -----------------
 $BaseTemp   = 'C:\Temp\UpdateW11'
@@ -301,6 +311,150 @@ function Show-ForcedPrompt {
   Invoke-InSTA $ui | Out-Null
 }
 
+# ----------------- DESCOBRIR USUÁRIO/SID/SESSÃO ATIVOS -----------------
+function Get-ActiveLogon {
+  $result = [ordered]@{ User=$null; Domain=$null; UserDomain=$null; SID=$null; SessionId=$null }
+  $quser = (& quser 2>$null)
+  if ($quser) {
+    $lines = $quser -split "`r?`n" | Where-Object { $_ -match '\s+Active\s' }
+    if ($lines) {
+      $line = $lines | Select-Object -First 1
+      $parts = $line -split '\s+'
+      # formato típico: USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON TIME
+      $user = $parts[0]
+      $id   = ($parts | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+      if ($user) {
+        if ($user -match '\\') {
+          $result.UserDomain = $user
+          $result.Domain,$result.User = $user -split '\\',2
+        } else {
+          $result.User = $user
+          $result.Domain = $env:USERDOMAIN
+          $result.UserDomain = "$($result.Domain)\$($result.User)"
+        }
+      }
+      if ($id) { $result.SessionId = [int]$id }
+    }
+  }
+  if (-not $result.UserDomain) {
+    $ud = (Get-CimInstance Win32_ComputerSystem).UserName
+    if ($ud) {
+      $result.UserDomain = $ud
+      $result.Domain,$result.User = $ud -split '\\',2
+    }
+  }
+  if ($result.UserDomain) {
+    try {
+      $nt = New-Object System.Security.Principal.NTAccount($result.UserDomain)
+      $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier])
+      $result.SID = $sid.Value
+    } catch {}
+  }
+  return [pscustomobject]$result
+}
+
+# ----------------- EXECUTAR UI NA SESSÃO ATIVA VIA TAREFA -----------------
+function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
+  $info = Get-ActiveLogon
+  if (-not $info.UserDomain) {
+    Write-Host "⚠ Nenhum usuário ativo encontrado. Não será possível exibir UI." -ForegroundColor Yellow
+    return $false
+  }
+  Write-Host "👤 Usuário ativo: $($info.UserDomain)  (SID=$($info.SID))  SessãoID=$($info.SessionId)"
+
+  $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
+  $tmpXml   = Join-Path $BaseTemp "ui_$([guid]::NewGuid()).xml"
+
+  $psPath = $PSCommandPath
+  if (-not $psPath) {
+    # salva cópia temporária do script atual se foi colado interativo
+    $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
+    $self = $MyInvocation.MyCommand.Definition
+    [IO.File]::WriteAllText($psPath, $self, [Text.Encoding]::UTF8)
+  }
+
+  $argSwitch =
+    if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
+
+  $action = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"
+
+  # Se tivermos SID do usuário, usamos no XML; senão, deixamos sem UserId (o Windows resolve pelo token interativo)
+  $principalUserId = if ($info.SID) { "UserId=""$($info.SID)""" } else { "" }
+
+  $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Exibe UI UpdateW11 na sessão do usuário atual</Description>
+  </RegistrationInfo>
+  <Triggers />
+  <Principals>
+    <Principal id="InteractiveUser" $principalUserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="InteractiveUser">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$psPath" $argSwitch</Arguments>
+      <WorkingDirectory>$BaseTemp</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+
+  # Grava XML em UTF-16 (schtasks exige)
+  [IO.File]::WriteAllText($tmpXml, $xml, [Text.Encoding]::Unicode)
+
+  try {
+    schtasks /Create /TN $taskName /XML $tmpXml /F | Out-Null
+  } catch {
+    Write-Host "❌ Falha ao criar tarefa para UI: $($_.Exception.Message)" -ForegroundColor Red
+    return $false
+  } finally {
+    Remove-Item $tmpXml -ErrorAction SilentlyContinue
+  }
+
+  # Limpa resposta anterior e dispara a UI
+  Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+  schtasks /Run /TN $taskName | Out-Null
+
+  # Espera até o usuário responder ou até expirar Timeout
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 1
+    $ans = Read-Answer
+    if ($ans) { break }
+    # opcional: pode checar Status da tarefa, mas monitorar o arquivo já é suficiente
+  }
+
+  # Apaga a tarefa
+  schtasks /Delete /TN $taskName /F | Out-Null
+
+  # Retorna true se houve resposta
+  return [bool](Read-Answer)
+}
+
 # ----------------- PASSO 1: Download/Montagem da ISO (com verificação) -----------------
 function Do-Step1 {
   param(
@@ -388,36 +542,56 @@ function Do-Step2 {
   Restart-Computer -Timeout 10 -Force
 }
 
+# ============================== ROTINAS CHAMADAS PELAS TAREFAS ==============================
+if ($ShowPromptOnly) {
+  Show-ChoicePrompt
+  exit 0
+}
+if ($ShowForcedOnly) {
+  Show-ForcedPrompt
+  exit 0
+}
+
 # ============================== FLUXO PRINCIPAL ==============================
 # 1) Passo 1 (automático) — usa TEMP e reaproveita ISO válida
 $isoUrl  = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
 $driveX  = Do-Step1 -IsoUrl $isoUrl -Dest $BaseTemp
 
-# 2) Primeira pergunta (NOW / 1h / 2h)
-Show-ChoicePrompt
+# 2) Primeira pergunta (NOW / 1h / 2h) — SEMPRE na sessão do usuário ativo
+Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+$shown = Start-UiInActiveSession -Mode 'choice' -TimeoutSec 1800  # espera até 30 min pela resposta
+if (-not $shown) {
+  Write-Host "⚠ Não foi possível exibir a UI ao usuário atual. Prosseguindo com execução obrigatória."
+  Write-Answer 'NOW'
+}
 
 # 3) Ler resposta e decidir
 $choice = Read-Answer
 switch ($choice) {
   'NOW'   {
-    Show-ForcedPrompt  # tela obrigatória com timer de 5 min
+    # Tela obrigatória (countdown) na sessão do usuário
+    Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   '3600'  {
     Write-Host "⏳ Aguardando 1 hora antes da execução..."
     Start-Sleep -Seconds 60
-    Show-ForcedPrompt
+    Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   '7200'  {
     Write-Host "⏳ Aguardando 2 horas antes da execução..."
     Start-Sleep -Seconds 120
-    Show-ForcedPrompt
+    Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   default {
     Write-Host "⚠ Resposta inválida ou ausente. Prosseguindo com execução obrigatória."
-    Show-ForcedPrompt
+    Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
 }
