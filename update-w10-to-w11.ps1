@@ -4,6 +4,7 @@
 # *** Usa SOMENTE C:\Temp\UpdateW11 ***
 # *** Reaproveita ISO (>=5GB), monta preferencialmente em X: ***
 # *** UI aparece no usuário ATUAL via schtasks /RU <DOMÍNIO\USUÁRIO> /IT ***
+# *** Tarefa roda em -STA e registra stdout/stderr em ui_task.log ***
 #====================================================================
 
 #requires -version 5.1
@@ -33,8 +34,9 @@ if ($osCaption -match "Windows 11") {
 $BaseTemp   = 'C:\Temp\UpdateW11'
 if (-not (Test-Path $BaseTemp)) { New-Item -Path $BaseTemp -ItemType Directory -Force | Out-Null }
 
-$AnswerPath = Join-Path $BaseTemp 'answer.txt'  # NOW / 3600 / 7200
+$AnswerPath = Join-Path $BaseTemp 'answer.txt'    # NOW / 3600 / 7200
 $UiLogPath  = Join-Path $BaseTemp 'ui.log'
+$TaskLog    = Join-Path $BaseTemp 'ui_task.log'
 
 # ----------------- LOG SIMPLES -----------------
 function Write-UiLog([string]$msg) {
@@ -65,7 +67,7 @@ function Read-Answer {
 }
 
 function Invoke-InSTA([ScriptBlock]$ScriptToRun) {
-  # Garante STA; mostra janela (WindowStyle Normal)
+  # Garante STA; janela visível
   $PsExeFull = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
   if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     $tmp = [IO.Path]::GetTempFileName().Replace(".tmp",".ps1")
@@ -77,7 +79,11 @@ function Invoke-InSTA([ScriptBlock]$ScriptToRun) {
     Remove-Item $tmp -ErrorAction SilentlyContinue
     return $true
   } else {
-    & $ScriptToRun
+    try { & $ScriptToRun }
+    catch {
+      Write-UiLog ("Invoke-InSTA inner error: " + $_.Exception.Message)
+      Start-Sleep -Seconds 3
+    }
     return $false
   }
 }
@@ -154,6 +160,7 @@ function Show-ChoicePrompt {
     $BtnDelay1.add_Click({ Write-Answer '3600'; Allow-Close $window; $window.Close() })
     $BtnDelay2.add_Click({ Write-Answer '7200'; Allow-Close $window; $window.Close() })
 
+    Start-Sleep -Milliseconds 300
     $null = $window.ShowDialog()
   }
   Invoke-InSTA $ui | Out-Null
@@ -270,6 +277,7 @@ function Show-ForcedPrompt {
     })
     $timer.Start()
 
+    Start-Sleep -Milliseconds 300
     $null = $window.ShowDialog()
   }
   Invoke-InSTA $ui | Out-Null
@@ -328,7 +336,7 @@ function Get-ActiveLogon {
   return [pscustomobject]$result
 }
 
-# ----------------- EXECUTAR UI NA SESSÃO ATIVA (sem XML, com /RU ... /IT) -----------------
+# ----------------- EXECUTAR UI NA SESSÃO ATIVA (sem XML, /RL LIMITED, /IT, -STA, log) -----------------
 function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
   $info = Get-ActiveLogon
   if (-not $info.User -or -not $info.EffectiveDomain) {
@@ -337,13 +345,13 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
     return $false
   }
 
-  $ru = "$($info.EffectiveDomain)\$($info.User)"  # PC\user (workgroup) ou DOM\user (domínio)
+  $ru = "$($info.EffectiveDomain)\$($info.User)"  # PC\user (workgroup) ou DOM\user (AD)
   Write-Host "👤 Usuário ativo: $ru  (SessãoID=$($info.SessionId))"
   Write-UiLog  "Usuário ativo: $ru | SessãoID=$($info.SessionId)"
 
   $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
 
-  # Caminho deste script (garante arquivo físico quando rodando via IEX)
+  # Garante que o script físico exista quando rodou via IEX
   $psPath = $PSCommandPath
   if (-not $psPath) {
     $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
@@ -354,18 +362,20 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
 
   $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
   $psExe     = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"  # sem -WindowStyle Hidden
 
-  # /SC ONCE precisa de horário válido; usa agora + 2min
+  # Wrapper em CMD: roda em -STA e registra stdout/stderr em ui_task.log; mantém janela 5s se erro
+  $cmdWrapper = @"
+cmd /c ""$psExe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Normal -File `"$psPath`" $argSwitch ^>^> `"$TaskLog`" 2^>^&1 || (echo ERROR LEVEL %%errorlevel%% ^>^> `"$TaskLog`" & timeout /t 5)""
+"@.Trim()
+
+  # /SC ONCE precisa de horário futuro: agora + 2min
   $startTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
 
   $createCmd = @(
-    '/Create',
-    '/TN', $taskName,
-    '/SC', 'ONCE',
-    '/ST', $startTime,
-    '/TR', "`"$psExe $arguments`"",
-    '/RL', 'HIGHEST',
+    '/Create','/TN', $taskName,
+    '/SC','ONCE','/ST', $startTime,
+    '/TR', $cmdWrapper,
+    '/RL','LIMITED',   # evita desktop elevado/UAC
     '/RU', $ru,
     '/IT',
     '/F'
@@ -380,7 +390,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
     return $false
   }
 
-  # Limpa resposta anterior e dispara a UI
+  # Limpa resposta anterior e dispara a tarefa
   Remove-Item $AnswerPath -ErrorAction SilentlyContinue
   schtasks /Run /TN $taskName | Out-Null
   Write-UiLog "Tarefa executada: $taskName"
