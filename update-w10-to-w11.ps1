@@ -315,34 +315,42 @@ function Show-ForcedPrompt {
 function Get-ActiveLogon {
   $result = [ordered]@{ User=$null; Domain=$null; UserDomain=$null; SID=$null; SessionId=$null }
   $quser = (& quser 2>$null)
+
   if ($quser) {
-    $lines = $quser -split "`r?`n" | Where-Object { $_ -match '\s+Active\s' }
+    # Normaliza espaços e separa linhas; aceita "Active" (EN) e "Ativo" (PT-BR)
+    $lines = $quser -split "`r?`n" | Where-Object { $_ -match '\s+(Active|Ativo)\s' }
     if ($lines) {
       $line = $lines | Select-Object -First 1
-      $parts = $line -split '\s+'
-      # formato típico: USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON TIME
-      $user = $parts[0]
-      $id   = ($parts | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
-      if ($user) {
-        if ($user -match '\\') {
-          $result.UserDomain = $user
-          $result.Domain,$result.User = $user -split '\\',2
+
+      # Quser tipicamente: USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON TIME
+      # Captura o primeiro token (user) e o primeiro número inteiro (ID)
+      $parts = ($line -replace '^\s*>\s*','') -split '\s+'
+      $userToken = $parts[0]
+      $idToken   = ($parts | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+
+      if ($userToken) {
+        if ($userToken -match '\\') {
+          $result.UserDomain = $userToken
+          $result.Domain,$result.User = $userToken -split '\\',2
         } else {
-          $result.User = $user
+          $result.User = $userToken
           $result.Domain = $env:USERDOMAIN
           $result.UserDomain = "$($result.Domain)\$($result.User)"
         }
       }
-      if ($id) { $result.SessionId = [int]$id }
+      if ($idToken) { $result.SessionId = [int]$idToken }
     }
   }
+
   if (-not $result.UserDomain) {
+    # Fallback: pega o usuário do Win32_ComputerSystem se o quser falhar
     $ud = (Get-CimInstance Win32_ComputerSystem).UserName
     if ($ud) {
       $result.UserDomain = $ud
       $result.Domain,$result.User = $ud -split '\\',2
     }
   }
+
   if ($result.UserDomain) {
     try {
       $nt = New-Object System.Security.Principal.NTAccount($result.UserDomain)
@@ -350,8 +358,10 @@ function Get-ActiveLogon {
       $result.SID = $sid.Value
     } catch {}
   }
+
   return [pscustomobject]$result
 }
+
 
 # ----------------- EXECUTAR UI NA SESSÃO ATIVA VIA TAREFA -----------------
 function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
@@ -365,22 +375,21 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
   $tmpXml   = Join-Path $BaseTemp "ui_$([guid]::NewGuid()).xml"
 
+  # Caminho deste script
   $psPath = $PSCommandPath
   if (-not $psPath) {
-    # salva cópia temporária do script atual se foi colado interativo
     $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
     $self = $MyInvocation.MyCommand.Definition
     [IO.File]::WriteAllText($psPath, $self, [Text.Encoding]::UTF8)
   }
 
-  $argSwitch =
-    if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
+  $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
 
-  $action = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"
+  # Use o PowerShell "cheio" para evitar PATH issues no Agendador
+  $psExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$psPath`" $argSwitch"
 
-  # Se tivermos SID do usuário, usamos no XML; senão, deixamos sem UserId (o Windows resolve pelo token interativo)
-  $principalUserId = if ($info.SID) { "UserId=""$($info.SID)""" } else { "" }
-
+  # IMPORTANTE: Com InteractiveToken, NÃO colocar UserId aqui
   $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -389,7 +398,7 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   </RegistrationInfo>
   <Triggers />
   <Principals>
-    <Principal id="InteractiveUser" $principalUserId>
+    <Principal id="InteractiveUser">
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
@@ -415,15 +424,15 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   </Settings>
   <Actions Context="InteractiveUser">
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$psPath" $argSwitch</Arguments>
+      <Command>$psExe</Command>
+      <Arguments>$arguments</Arguments>
       <WorkingDirectory>$BaseTemp</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 "@
 
-  # Grava XML em UTF-16 (schtasks exige)
+  # Grava XML em UTF-16
   [IO.File]::WriteAllText($tmpXml, $xml, [Text.Encoding]::Unicode)
 
   try {
@@ -445,13 +454,11 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
     Start-Sleep -Seconds 1
     $ans = Read-Answer
     if ($ans) { break }
-    # opcional: pode checar Status da tarefa, mas monitorar o arquivo já é suficiente
   }
 
   # Apaga a tarefa
   schtasks /Delete /TN $taskName /F | Out-Null
 
-  # Retorna true se houve resposta
   return [bool](Read-Answer)
 }
 
