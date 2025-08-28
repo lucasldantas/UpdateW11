@@ -332,7 +332,7 @@ function Do-Step2 {
 
 # ============================== FLUXO PRINCIPAL ==============================
 # 1) Passo 1 (automático)
-$isoUrl  = 'COLOQUE_AQUI_SEU_LINK_DIRETO_DA_AWS'  # <-- ajuste aqui
+$isoUrl  = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'  # <-- ajuste aqui
 $driveX  = Do-Step1 -IsoUrl $isoUrl
 
 # 2) Primeira pergunta (NOW / 1h / 2h)
