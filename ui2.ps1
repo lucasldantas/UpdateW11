@@ -142,7 +142,7 @@ function Execute-Now {
   if ($script:done) { return }
   $script:done = $true
   try { $timer.Stop() } catch {}
-  Save-Answer 'Executar agora'
+  Save-Answer 'NOW'
   Allow-Close $window
   $window.Close()
 }
