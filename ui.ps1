@@ -16,83 +16,16 @@ $Txt_BtnDelay1            = 'Adiar 1 hora'
 $Txt_BtnDelay2            = 'Adiar 2 horas'
 # ==========================================================
 
-# ==================== Descobrir usuário interativo ativo ====================
-function Get-ActiveInteractiveUser {
-  $res = [ordered]@{ User=$null; Domain=$null; EffectiveDomain=$null; RU=$null; SessionId=$null }
-
-  $quser = try { & quser 2>$null } catch { $null }
-  if ($quser) {
-    $line = ($quser -split "`r?`n" |
-             Where-Object { $_ -match '(?i)\s(Active|Ativo)\s' } |
-             Select-Object -First 1)
-    if ($line) {
-      $tokens = ($line -replace '^\s*>\s*','') -split '\s+'
-      $userTok = $tokens[0]
-      $idTok   = ($tokens | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
-      if ($userTok) {
-        if ($userTok -match '\\') { $res.Domain,$res.User = $userTok -split '\\',2 }
-        else { $res.User = $userTok; $res.Domain = $env:USERDOMAIN }
-      }
-      if ($idTok) { $res.SessionId = [int]$idTok }
-    }
-  }
-
-  if (-not $res.User) {
-    $ud = try { (Get-CimInstance Win32_ComputerSystem).UserName } catch { $null }
-    if ($ud) {
-      if ($ud -match '\\') { $res.Domain,$res.User = $ud -split '\\',2 }
-      else { $res.User = $ud; $res.Domain = $env:USERDOMAIN }
-    }
-  }
-
-  $machine = try { (Get-CimInstance Win32_ComputerSystem).Name } catch { $env:COMPUTERNAME }
-  $dom = if ([string]::IsNullOrWhiteSpace($res.Domain) -or $res.Domain -eq 'WORKGROUP') { $machine } else { $res.Domain }
-  $res.EffectiveDomain = $dom
-  if ($res.User) { $res.RU = "$dom\$($res.User)" }
-
-  return [pscustomobject]$res
-}
-
-# ==================== Se NÃO for -RePrompt, garante que rode na sessão do usuário ativo ====================
-if (-not $RePrompt) {
-  $who = Get-ActiveInteractiveUser
-  $curDom = if ([string]::IsNullOrWhiteSpace($env:USERDOMAIN) -or $env:USERDOMAIN -eq 'WORKGROUP') { $env:COMPUTERNAME } else { $env:USERDOMAIN }
-  $curRU  = "$curDom\$env:USERNAME"
-
-  # Se já estamos na sessão do usuário interativo, abre direto; senão agenda e sai.
-  if ($who.RU -and ($who.RU -ne $curRU)) {
-    Write-Host "👤 Usuário interativo ativo: $($who.RU)  (SessãoID=$($who.SessionId))"
-    # Caminho físico deste script
-    $psPath = $PSCommandPath
-    if (-not $psPath) {
-      $psPath = 'C:\ProgramData\W11_UI_Prompt.ps1'
-      $self   = $MyInvocation.MyCommand.Definition
-      [IO.File]::WriteAllText($psPath, $self, [Text.Encoding]::UTF8)
-    }
-
-    # Monta o /TR como UM ÚNICO argumento (sem wrapper)
-    $psExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $tr    = "$psExe -NoProfile -ExecutionPolicy Bypass -STA -File `"$psPath`" -RePrompt"
-
-    $taskName  = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
-    $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-
-    $argsCreate = @(
-      '/Create','/TN', $taskName,
-      '/SC','ONCE','/ST', $startTime,
-      '/TR', $tr,                # <- UM argumento só!
-      '/RL','LIMITED',
-      '/RU', $who.RU,
-      '/IT',
-      '/F'
-    )
-    # Cria e executa
-    schtasks @argsCreate | Out-Null
-    schtasks /Run /TN $taskName | Out-Null
-    Write-Host "🗓️  Tarefa criada/executada para $($who.RU): $taskName"
+# ---------- Garantir STA ----------
+$PsExeFull = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+try {
+  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
+    if ($RePrompt) { $args += '-RePrompt' }
+    Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
     return
   }
-}
+} catch {}
 
 # ---------- Apenas salvar a resposta ----------
 $AnswerPath = 'C:\ProgramData\answer.txt'
@@ -100,17 +33,6 @@ if (-not (Test-Path 'C:\ProgramData')) { New-Item -Path 'C:\ProgramData' -ItemTy
 function Save-Answer([string]$text){
   try { [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
 }
-
-# ---------- Garantir STA (apenas quando vamos exibir UI) ----------
-$PsExeFull = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-try {
-  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
-    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
-    if ($RePrompt) { $args += '-RePrompt' }
-    Start-Process -FilePath $PsExeFull -ArgumentList $args -WindowStyle Normal | Out-Null
-    return
-  }
-} catch {}
 
 # ==================== UI (WPF) ====================
 Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
