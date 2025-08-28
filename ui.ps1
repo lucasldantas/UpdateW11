@@ -2,42 +2,51 @@
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = 'Stop'
 
-# ===================== CONFIG =====================
-$AnswerFile  = 'C:\ProgramData\Answer.txt'
-$UiScript    = 'C:\ProgramData\ShowChoice.ps1'
+# ========= CONFIG =========
+$AnswerFile = 'C:\ProgramData\Answer.txt'
+$UiScript   = 'C:\ProgramData\ShowChoice.ps1'
 
-# Garante pasta
-$dir = Split-Path $UiScript
-if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-
-# ===================== UI (Win11-like, robusto) =====================
-# (Here-string com aspas simples para não expandir variáveis)
+# ========= UI (sem Paint/owner-draw; estável) =========
 $ui = @'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
-function New-RoundRegion([System.Drawing.Rectangle]$rect, [int]$radius){
-  $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $d = $radius * 2
-  $gp.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
-  $gp.AddArc($rect.Right-$d, $rect.Y, $d, $d, 270, 90)
-  $gp.AddArc($rect.Right-$d, $rect.Bottom-$d, $d, $d, 0, 90)
-  $gp.AddArc($rect.X, $rect.Bottom-$d, $d, $d, 90, 90)
-  $gp.CloseFigure()
-  return $gp
-}
-
-# Classe única p/ dark mode (se disponível)
-if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.DwmUtil', $false) } | Where-Object { $_ })) {
+# --- helpers para arrastar janela sem borda ---
+if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.Move', $false) } | ? { $_ })) {
   Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 namespace GDL.Win {
-  public static class DwmUtil {
-    [DllImport("dwmapi.dll", PreserveSig=true)]
-    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
-    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_NEW = 20;
+  public static class Move {
+    [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+    public const int WM_NCLBUTTONDOWN = 0xA1;
+    public const int HTCAPTION = 0x2;
+  }
+}
+"@
+}
+
+# --- helper p/ cantos arredondados, sem usar Paint ---
+if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.Rounder', $false) } | ? { $_ })) {
+  Add-Type -TypeDefinition @"
+using System.Drawing;
+using System.Drawing.Drawing2D;
+namespace GDL.Win {
+  public static class Rounder {
+    public static Region MakeRoundRegion(int w, int h, int radius){
+      GraphicsPath gp = new GraphicsPath();
+      int d = radius*2;
+      gp.AddArc(0,0,d,d,180,90);
+      gp.AddArc(w-d,0,d,d,270,90);
+      gp.AddArc(w-d,h-d,d,d,0,90);
+      gp.AddArc(0,h-d,d,d,90,90);
+      gp.CloseFigure();
+      Region r = new Region(gp);
+      gp.Dispose();
+      return r;
+    }
   }
 }
 "@
@@ -49,172 +58,121 @@ $panelBg = [System.Drawing.Color]::FromArgb(40,40,46)
 $accent  = [System.Drawing.Color]::FromArgb(0,120,212)
 $text    = [System.Drawing.Color]::FromArgb(230,230,235)
 $subtext = [System.Drawing.Color]::FromArgb(180,180,190)
-$border  = [System.Drawing.Color]::FromArgb(60,60,70)
 
 # Form
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Agendamento'
-$form.FormBorderStyle = 'None'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(520,280)
+$form.Size = New-Object System.Drawing.Size(520,240)
 $form.TopMost = $true
 $form.BackColor = $bg
+$form.FormBorderStyle = 'None'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
-# Dark + borda arredondada
-$form.add_Shown({
-  try {
-    $dark = 1
-    [void][GDL.Win.DwmUtil]::DwmSetWindowAttribute($form.Handle, [GDL.Win.DwmUtil]::DWMWA_USE_IMMERSIVE_DARK_MODE_NEW, [ref]$dark, 4)
-    [void][GDL.Win.DwmUtil]::DwmSetWindowAttribute($form.Handle, [GDL.Win.DwmUtil]::DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, [ref]$dark, 4)
-  } catch {}
-  $r = New-Object System.Drawing.Rectangle(0,0,$form.Width,$form.Height)
-  $form.Region = New-Object System.Drawing.Region( (New-RoundRegion $r 18) )
-})
-$form.add_Resize({
-  $r = New-Object System.Drawing.Rectangle(0,0,$form.Width,$form.Height)
-  $form.Region = New-Object System.Drawing.Region( (New-RoundRegion $r 18) )
+# Titlebar simples (sem Paint)
+$title = New-Object System.Windows.Forms.Panel
+$title.Height = 42; $title.Dock = 'Top'; $title.BackColor = $panelBg
+$form.Controls.Add($title)
+$title.Add_MouseDown({ param($s,$e)
+  if($e.Button -eq 'Left'){
+    [GDL.Win.Move]::ReleaseCapture() | Out-Null
+    [GDL.Win.Move]::SendMessage($form.Handle, [GDL.Win.Move]::WM_NCLBUTTONDOWN, [GDL.Win.Move]::HTCAPTION, 0) | Out-Null
+  }
 })
 
-# Titlebar
-$titleBar = New-Object System.Windows.Forms.Panel
-$titleBar.Height = 42; $titleBar.Dock = 'Top'; $titleBar.BackColor = $panelBg
-$form.Controls.Add($titleBar)
-$titleBar.Paint += {
-  param($s,$e)
-  $e.Graphics.SmoothingMode = 'AntiAlias'
-  $pen = New-Object System.Drawing.Pen($border)
-  $e.Graphics.DrawLine($pen, 0, $titleBar.Height-1, $titleBar.Width, $titleBar.Height-1)
-  $pen.Dispose()
-}
-$lblTitle = New-Object System.Windows.Forms.Label
-$lblTitle.Text = 'Atualização obrigatória'
-$lblTitle.ForeColor = $text
-$lblTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
-$lblTitle.AutoSize = $true
-$lblTitle.Location = New-Object System.Drawing.Point(18, 11)
-$titleBar.Controls.Add($lblTitle)
+$lbl = New-Object System.Windows.Forms.Label
+$lbl.Text = 'Atualização obrigatória'
+$lbl.AutoSize = $true
+$lbl.ForeColor = $text
+$lbl.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+$lbl.Location = New-Object System.Drawing.Point(14,10)
+$title.Controls.Add($lbl)
 
 $btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Text = '✕'
-$btnClose.FlatStyle = 'Flat'
-$btnClose.FlatAppearance.BorderSize = 0
-$btnClose.ForeColor = $subtext
-$btnClose.BackColor = $panelBg
-$btnClose.Width = 40; $btnClose.Height = 32
-$btnClose.Location = New-Object System.Drawing.Point($form.Width-50,5)
-$btnClose.Anchor = 'Top,Right'
-$btnClose.Add_MouseEnter({ $btnClose.ForeColor = [System.Drawing.Color]::White })
-$btnClose.Add_MouseLeave({ $btnClose.ForeColor = $subtext })
+$btnClose.Text = '×'
+$btnClose.Width=36; $btnClose.Height=28
+$btnClose.FlatStyle='Flat'; $btnClose.FlatAppearance.BorderSize=0
+$btnClose.BackColor=$panelBg; $btnClose.ForeColor=$subtext
+$btnClose.Anchor='Top,Right'
+$title.Controls.Add($btnClose)
+$placeClose = {
+  $btnClose.Location = New-Object System.Drawing.Point( ($form.ClientSize.Width - $btnClose.Width - 8), 7)
+}
+& $placeClose
+$title.Add_SizeChanged($placeClose)
 $btnClose.Add_Click({ $form.Close() })
-$titleBar.Controls.Add($btnClose)
 
-# Arrastar janela
-$mouseDown = $false; $pt = New-Object System.Drawing.Point
-$titleBar.Add_MouseDown({ param($s,$e) if($e.Button -eq 'Left'){ $mouseDown=$true; $pt=$e.Location } })
-$titleBar.Add_MouseMove({ param($s,$e) if($mouseDown){ $form.Left += ($e.X - $pt.X); $form.Top += ($e.Y - $pt.Y) } })
-$titleBar.Add_MouseUp({ $mouseDown=$false })
+# Corpo
+$body = New-Object System.Windows.Forms.Panel
+$body.Dock='Fill'; $body.Padding='20,16,20,20'; $body.BackColor=$bg
+$form.Controls.Add($body)
 
-# Conteúdo
-$content = New-Object System.Windows.Forms.Panel
-$content.Dock = 'Fill'; $content.Padding = '22,18,22,22'; $content.BackColor = $bg
-$form.Controls.Add($content)
+$lbl1 = New-Object System.Windows.Forms.Label
+$lbl1.Text = 'Você pode executar agora ou adiar.'
+$lbl1.ForeColor=$text; $lbl1.Font=New-Object System.Drawing.Font('Segoe UI Semibold',12)
+$lbl1.AutoSize=$true; $lbl1.Location=New-Object System.Drawing.Point(8,8)
+$body.Controls.Add($lbl1)
 
-$card = New-Object System.Windows.Forms.Panel
-$card.BackColor = $panelBg; $card.Dock = 'Fill'; $card.Padding = '22,18,22,22'
-$card.add_Paint({
-  param($s,$e)
-  $rect = New-Object System.Drawing.Rectangle(0,0,$card.Width-1,$card.Height-1)
-  $gp = New-RoundRegion $rect 16
-  $e.Graphics.SmoothingMode = 'AntiAlias'
-  $e.Graphics.FillPath( (New-Object System.Drawing.SolidBrush $panelBg), $gp)
-  $e.Graphics.DrawPath( (New-Object System.Drawing.Pen $border), $gp)
-  $gp.Dispose()
-})
-$content.Controls.Add($card)
+$lbl2 = New-Object System.Windows.Forms.Label
+$lbl2.Text = 'Escolha uma opção abaixo.'
+$lbl2.ForeColor=$subtext; $lbl2.Font=New-Object System.Drawing.Font('Segoe UI',9)
+$lbl2.AutoSize=$true; $lbl2.Location=New-Object System.Drawing.Point(8,36)
+$body.Controls.Add($lbl2)
 
-$lblMain = New-Object System.Windows.Forms.Label
-$lblMain.Text = 'Você pode executar agora ou adiar.'
-$lblMain.ForeColor = $text
-$lblMain.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12)
-$lblMain.AutoSize = $true
-$lblMain.Location = New-Object System.Drawing.Point(12,10)
-$card.Controls.Add($lblMain)
+$flow = New-Object System.Windows.Forms.FlowLayoutPanel
+$flow.Dock='Bottom'; $flow.Height=80; $flow.Padding='8,8,8,8'
+$flow.FlowDirection='LeftToRight'; $flow.WrapContents=$false; $flow.BackColor=$bg
+$body.Controls.Add($flow)
 
-$lblSub = New-Object System.Windows.Forms.Label
-$lblSub.Text = 'Escolha uma opção abaixo. A operação é segura e rápida.'
-$lblSub.ForeColor = $subtext
-$lblSub.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$lblSub.AutoSize = $true
-$lblSub.Location = New-Object System.Drawing.Point(12,38)
-$card.Controls.Add($lblSub)
-
-# Botões
-$btnPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-$btnPanel.FlowDirection = 'LeftToRight'; $btnPanel.WrapContents = $false
-$btnPanel.Dock = 'Bottom'; $btnPanel.Height = 80; $btnPanel.Padding = '8,8,8,8'
-$card.Controls.Add($btnPanel)
-
-function New-PillButton([string]$text,[System.Drawing.Color]$bg,[System.Drawing.Color]$fg,[System.Drawing.Color]$hoverBg){
+function New-ChoiceButton([string]$text,[System.Drawing.Color]$bgColor,[System.Drawing.Color]$fgColor){
   $b = New-Object System.Windows.Forms.Button
-  $b.Text = $text
-  $b.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
-  $b.FlatStyle = 'Flat'
-  $b.FlatAppearance.BorderSize = 0
-  $b.BackColor = $bg
-  $b.ForeColor = $fg
-  $b.Width = 150; $b.Height = 40; $b.Margin = '8,8,8,8'
-  $b.add_Paint({
-    param($s,$e)
-    $btn = $s -as [System.Windows.Forms.Button]
-    $e.Graphics.SmoothingMode = 'AntiAlias'
-    $rect = New-Object System.Drawing.Rectangle(0,0,$btn.Width-1,$btn.Height-1)
-    $gp = New-RoundRegion $rect 20
-    $e.Graphics.FillPath( (New-Object System.Drawing.SolidBrush $btn.BackColor), $gp )
-    $outline = [System.Drawing.Color]::FromArgb(80, $border.R, $border.G, $border.B)
-    $e.Graphics.DrawPath( (New-Object System.Drawing.Pen $outline), $gp )
-    $gp.Dispose()
-    $fmt = New-Object System.Drawing.StringFormat
-    $fmt.Alignment = 'Center'; $fmt.LineAlignment = 'Center'
-    $e.Graphics.DrawString($btn.Text, $btn.Font, (New-Object System.Drawing.SolidBrush $btn.ForeColor), $rect, $fmt)
-    $fmt.Dispose()
+  $b.Text=$text
+  $b.Width=150; $b.Height=40; $b.Margin='8,8,8,8'
+  $b.FlatStyle='Flat'; $b.FlatAppearance.BorderSize=0
+  $b.BackColor=$bgColor; $b.ForeColor=$fgColor
+  # cantos arredondados (sem Paint)
+  $b.Add_SizeChanged({ param($s,$e)
+    $s.Region = [GDL.Win.Rounder]::MakeRoundRegion($s.Width, $s.Height, 20)
   })
-  $b.Add_MouseEnter({ param($s,$e) $s.BackColor = $hoverBg })
-  $b.Add_MouseLeave({ param($s,$e) $s.BackColor = $bg })
+  # aplica já
+  $b.Region = [GDL.Win.Rounder]::MakeRoundRegion($b.Width, $b.Height, 20)
   return $b
 }
 
 function Write-Answer([string]$val){
-  try { [System.IO.File]::WriteAllText('[[ANSWERFILE]]', $val, [Text.Encoding]::UTF8) } catch {}
+  try { [System.IO.File]::WriteAllText('[[ANSWERFILE]]',$val,[Text.Encoding]::UTF8) } catch {}
   $form.Close()
 }
 
-$btnNow = New-PillButton 'Executar agora' $accent [System.Drawing.Color]::White ([System.Drawing.Color]::FromArgb(0,99,175))
-$btn1H  = New-PillButton 'Adiar 1 hora' ([System.Drawing.Color]::FromArgb(58,58,66)) $text ([System.Drawing.Color]::FromArgb(75,75,86))
-$btn2H  = New-PillButton 'Adiar 2 horas' ([System.Drawing.Color]::FromArgb(58,58,66)) $text ([System.Drawing.Color]::FromArgb(75,75,86))
+$btnNow = New-ChoiceButton 'Executar agora' $accent ([System.Drawing.Color]::White)
+$btn1H  = New-ChoiceButton 'Adiar 1 hora' ([System.Drawing.Color]::FromArgb(58,58,66)) $text
+$btn2H  = New-ChoiceButton 'Adiar 2 horas' ([System.Drawing.Color]::FromArgb(58,58,66)) $text
 
 $btnNow.Add_Click({ Write-Answer 'NOW' })
 $btn1H.Add_Click({ Write-Answer '1H' })
 $btn2H.Add_Click({ Write-Answer '2H' })
 
-$btnPanel.Controls.Add($btnNow)
-$btnPanel.Controls.Add($btn1H)
-$btnPanel.Controls.Add($btn2H)
+$flow.Controls.AddRange(@($btnNow,$btn1H,$btn2H))
 
-$form.KeyPreview = $true
+# cantos arredondados do form (sem Paint)
+$form.Add_Shown({ $form.Region = [GDL.Win.Rounder]::MakeRoundRegion($form.Width,$form.Height,18) })
+$form.Add_SizeChanged({ $form.Region = [GDL.Win.Rounder]::MakeRoundRegion($form.Width,$form.Height,18) })
+
+# ESC fecha
+$form.KeyPreview=$true
 $form.Add_KeyDown({ param($s,$e) if($e.KeyCode -eq 'Escape'){ $form.Close() } })
 
-[void]$form.ShowDialog()
+[void][System.Windows.Forms.Application]::Run($form)
 '@
 
-# Substitui caminho do arquivo dentro do UI
-$ui = $ui.Replace('[[ANSWERFILE]]', $AnswerFile)
-Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
+# grava UI com caminho do arquivo embutido
+if (-not (Test-Path (Split-Path $UiScript))) { New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force | Out-Null }
+Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
 
-# ===================== LAUNCHER: enumera sessões e injeta em TODAS =====================
-# Carrega tipos apenas 1x por processo
-$launcherLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetType('GDL.Broadcast.SessionLauncher', $false) } | Where-Object { $_ }
-if (-not $launcherLoaded) {
+# ========= BROADCAST PARA TODAS AS SESSÕES =========
+# Carrega launcher (único por processo) – usa explorer.exe por sessão; fallback WTS (SYSTEM)
+$launcherType = [AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Broadcast.AllSessions', $false) } | ? { $_ }
+if (-not $launcherType) {
   $src = @"
 using System;
 using System.Diagnostics;
@@ -223,6 +181,17 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace GDL.Broadcast {
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct STARTUPINFO {
+    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+    public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
+    public int dwFlags; public short wShowWindow; public short cbReserved2;
+    public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
 
   public enum WTS_CONNECTSTATE_CLASS {
     Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init
@@ -236,130 +205,92 @@ namespace GDL.Broadcast {
   }
 
   public static class Native {
-    [DllImport("wtsapi32.dll", SetLastError=true)]
-    public static extern bool WTSEnumerateSessions(IntPtr hServer, int Reserved, int Version, out IntPtr ppSessionInfo, out int pCount);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+    [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr ProcessHandle, UInt32 DesiredAccess, out IntPtr TokenHandle);
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool CreateProcessWithTokenW(IntPtr hToken, UInt32 dwLogonFlags, string lpApplicationName, string lpCommandLine, UInt32 dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr hObject);
 
-    [DllImport("wtsapi32.dll")]
-    public static extern void WTSFreeMemory(IntPtr pMemory);
-
-    [DllImport("kernel32.dll")] public static extern IntPtr WTSGetActiveConsoleSessionId();
-
+    [DllImport("wtsapi32.dll", SetLastError=true)] public static extern bool WTSEnumerateSessions(IntPtr hServer, int Reserved, int Version, out IntPtr ppSessionInfo, out int pCount);
+    [DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr pMemory);
     [DllImport("wtsapi32.dll", SetLastError=true)] public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr Token);
-    [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr hExistingToken, UInt32 dwDesiredAccess, IntPtr lpTokenAttributes, Int32 ImpersonationLevel, Int32 TokenType, out IntPtr phNewToken);
-    [DllImport("userenv.dll", SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
-    [DllImport("userenv.dll", SetLastError=true)] static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+    [DllImport("userenv.dll", SetLastError=true)] public static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+    [DllImport("userenv.dll", SetLastError=true)] public static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    static extern bool CreateProcessAsUser(IntPtr hToken, string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-
-    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-    [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr ProcessHandle, UInt32 DesiredAccess, out IntPtr TokenHandle);
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    static extern bool CreateProcessWithTokenW(IntPtr hToken, UInt32 dwLogonFlags, string lpApplicationName, string lpCommandLine, UInt32 dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr hObject);
-
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-    public struct STARTUPINFO {
-      public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
-      public int dwX; public int dwY; public int dwXSize; public int dwYSize;
-      public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
-      public int dwFlags; public short wShowWindow; public short cbReserved2;
-      public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
-
-    public const UInt32 GENERIC_ALL = 0x10000000;
-    public const int SecurityImpersonation = 2;
-    public const int TokenPrimary = 1;
-    public const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
-    public const UInt32 LOGON_WITH_PROFILE = 0x00000001;
-    public const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
+    public static extern bool CreateProcessAsUser(IntPtr hToken, string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
 
     public const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     public const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
-
     public const UInt32 TOKEN_QUERY = 0x0008;
     public const UInt32 TOKEN_DUPLICATE = 0x0002;
     public const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
     public const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
+    public const UInt32 LOGON_WITH_PROFILE = 0x00000001;
+    public const UInt32 CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    public const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
 
-    public static bool LaunchViaWTS(uint sessionId, string cmdLine) {
-      try {
-        IntPtr userToken;
-        if (!WTSQueryUserToken(sessionId, out userToken)) return false;
-
-        IntPtr primaryToken;
-        if (!DuplicateTokenEx(userToken, GENERIC_ALL, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out primaryToken)) {
-          CloseHandle(userToken);
-          return false;
-        }
-
-        IntPtr env;
-        CreateEnvironmentBlock(out env, primaryToken, false);
-
-        STARTUPINFO si = new STARTUPINFO();
-        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-        si.lpDesktop = @"winsta0\default";
-
-        PROCESS_INFORMATION pi;
-        bool ok = CreateProcessAsUser(primaryToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, env, null, ref si, out pi);
-
-        if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
-        if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
-        CloseHandle(primaryToken);
-        CloseHandle(userToken);
-        return ok;
-      } catch { return false; }
-    }
-
-    public static bool LaunchViaExplorerToken(uint sessionId, string cmdLine) {
-      try {
-        var explorer = Process.GetProcessesByName("explorer")
-                        .FirstOrDefault(p => { try { return (uint)p.SessionId == sessionId; } catch { return false; } });
-        if (explorer == null) return false;
-
-        IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, explorer.Id);
-        if (hProc == IntPtr.Zero) return false;
-
-        IntPtr hTok;
-        bool gotTok = OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY, out hTok);
-        CloseHandle(hProc);
-        if (!gotTok) return false;
-
-        STARTUPINFO si = new STARTUPINFO();
-        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-        si.lpDesktop = @"winsta0\default";
-        PROCESS_INFORMATION pi;
-        bool ok = CreateProcessWithTokenW(hTok, LOGON_WITH_PROFILE, null, cmdLine, CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
-
-        if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
-        CloseHandle(hTok);
-        return ok;
-      } catch { return false; }
-    }
-
-    public static IEnumerable<Tuple<uint, WTS_CONNECTSTATE_CLASS>> EnumerateSessions() {
-      IntPtr pInfo;
-      int count;
+    public static IEnumerable<Tuple<uint,WTS_CONNECTSTATE_CLASS>> EnumerateSessions() {
+      IntPtr pInfo; int count;
       if (!WTSEnumerateSessions(IntPtr.Zero, 0, 1, out pInfo, out count)) yield break;
-      int dataSize = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+      int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
       try {
-        for (int i=0; i<count; i++) {
-          IntPtr rec = new IntPtr(pInfo.ToInt64() + i*dataSize);
+        for (int i=0;i<count;i++){
+          IntPtr rec = new IntPtr(pInfo.ToInt64() + i*size);
           WTS_SESSION_INFO si = (WTS_SESSION_INFO)Marshal.PtrToStructure(rec, typeof(WTS_SESSION_INFO));
           yield return Tuple.Create((uint)si.SessionID, si.State);
         }
-      } finally {
-        WTSFreeMemory(pInfo);
-      }
+      } finally { WTSFreeMemory(pInfo); }
+    }
+
+    public static bool LaunchWithExplorerToken(int pid, string cmdLine) {
+      IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, false, pid);
+      if (hProc == IntPtr.Zero) return false;
+      IntPtr hTok;
+      bool okTok = OpenProcessToken(hProc, TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY, out hTok);
+      CloseHandle(hProc);
+      if (!okTok) return false;
+
+      STARTUPINFO si = new STARTUPINFO();
+      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+      si.lpDesktop = @"winsta0\default";
+      PROCESS_INFORMATION pi;
+      bool ok = CreateProcessWithTokenW(hTok, LOGON_WITH_PROFILE, null, cmdLine, CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
+      if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+      CloseHandle(hTok);
+      return ok;
+    }
+
+    public static bool LaunchViaWTS(uint sessionId, string cmdLine) {
+      IntPtr userToken;
+      if (!WTSQueryUserToken(sessionId, out userToken)) return false;
+
+      IntPtr env;
+      CreateEnvironmentBlock(out env, userToken, false);
+      STARTUPINFO si = new STARTUPINFO();
+      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+      si.lpDesktop = @"winsta0\default";
+
+      PROCESS_INFORMATION pi;
+      bool ok = CreateProcessAsUser(userToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, env, null, ref si, out pi);
+      if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+      if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
+      CloseHandle(userToken);
+      return ok;
     }
   }
 
-  public static class SessionLauncher {
+  public static class AllSessions {
+    public static IEnumerable<uint> ExplorerSessions() {
+      return Process.GetProcessesByName("explorer").Select(p => (uint)p.SessionId).Distinct();
+    }
     public static bool LaunchInSession(uint sessionId, string cmdLine) {
-      if (Native.LaunchViaWTS(sessionId, cmdLine)) return true;        // SYSTEM path
-      if (Native.LaunchViaExplorerToken(sessionId, cmdLine)) return true; // Admin elevated path
-      return false;
+      // tenta via explorer.exe dessa sessão
+      var anyExplorer = Process.GetProcessesByName("explorer").Where(p => (uint)p.SessionId == sessionId).FirstOrDefault();
+      if (anyExplorer != null) {
+        if (Native.LaunchWithExplorerToken(anyExplorer.Id, cmdLine)) return true;
+      }
+      // fallback WTS (requer SYSTEM)
+      return Native.LaunchViaWTS(sessionId, cmdLine);
     }
   }
 }
@@ -367,49 +298,39 @@ namespace GDL.Broadcast {
   Add-Type -TypeDefinition $src -Language CSharp
 }
 
-# Garante TermService
-try { Start-Service -Name TermService -ErrorAction Stop } catch {}
+# Garante TermService pronto (para WTS fallback)
+try { Start-Service -Name TermService -ErrorAction SilentlyContinue | Out-Null } catch {}
 
-# PS 64-bit garantido
+# PowerShell 64-bit (caso host 32-bit)
 $PS64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $PS64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
-# Grava UI
-Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
-
-# Comando a ser lançado em cada sessão
+# Monta comando que cada sessão vai executar
 $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$UiScript`""
 $cmd    = "`"$PS64`" $psArgs"
 
-# ===================== ENUMERA TODAS AS SESSÕES E DISPARA =====================
-$launched = @()
-$failed   = @()
+# Descobre TODAS as sessões: via WTS + via explorer.exe
+$wtsSessions = [GDL.Broadcast.Native]::EnumerateSessions() | % { [pscustomobject]@{ Id=$_.Item1; State=$_.Item2 } }
+$expSessions = [GDL.Broadcast.AllSessions]::ExplorerSessions() | % { [pscustomobject]@{ Id=$_; State='Explorer' } }
 
-# Preferimos sessões que têm explorer.exe (sessões interativas)
-# Mas ainda assim tentamos todas que aparecem na WTS (Active/Connected/etc.)
-$sessions = [GDL.Broadcast.Native]::EnumerateSessions() | ForEach-Object {
-  [pscustomobject]@{ Id = $_.Item1; State = $_.Item2 }
+# Unifica por Id
+$all = @{} 
+foreach($s in $wtsSessions + $expSessions){ $all[[uint32]$s.Id] = $s }
+$sessions = $all.Values | Sort-Object Id
+
+$okList = @(); $failList = @()
+foreach($sess in $sessions){
+  $id = [uint32]$sess.Id
+  $ok = [GDL.Broadcast.AllSessions]::LaunchInSession($id, $cmd)
+  if($ok){ $okList += $id } else { $failList += $sess }
 }
 
-foreach ($sess in $sessions) {
-  $sid = [uint32]$sess.Id
-  # Se houver explorer nessa sessão, é um bom alvo; se não houver, ainda tentamos (WTS pode injetar mesmo sem explorer)
-  $hasExplorer = (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid }) -ne $null
-
-  $ok = [GDL.Broadcast.SessionLauncher]::LaunchInSession($sid, $cmd)
-  if ($ok) {
-    $launched += $sid
-  } else {
-    $failed   += [pscustomobject]@{ SessionId = $sid; State = $sess.State; Explorer = $hasExplorer }
-  }
+Write-Host ("Sessões encontradas: {0} | Sucesso: {1} | Falha: {2}" -f $sessions.Count, $okList.Count, $failList.Count)
+if($failList.Count){
+  Write-Warning ("Falhas: " + ($failList | Select-Object Id,State | ConvertTo-Json -Compress))
 }
 
-Write-Host "Sessões alvo: $($sessions.Count) | Disparadas com sucesso: $($launched.Count) | Falhas: $($failed.Count)"
-if ($failed.Count -gt 0) {
-  Write-Warning ("Falhas por sessão: " + ($failed | ConvertTo-Json -Compress))
-}
-
-# Se nenhuma sessão foi acionada, grava NOUSER (para sua lógica detectar)
-if ($launched.Count -eq 0 -and -not (Test-Path $AnswerFile)) {
+# Se nada abriu, grava NOUSER p/ diagnóstico
+if(($okList.Count -eq 0) -and -not (Test-Path $AnswerFile)){
   Set-Content -Path $AnswerFile -Value 'NOUSER' -Encoding UTF8
 }
