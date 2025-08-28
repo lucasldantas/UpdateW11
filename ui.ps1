@@ -2,17 +2,37 @@
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = 'Stop'
 
-# ========= CONFIG =========
-$AnswerFile = 'C:\ProgramData\Answer.txt'
-$UiScript   = 'C:\ProgramData\ShowChoice.ps1'
+# ========== VARIÁVEIS (edite aqui) ==========
+$AnswerFile  = 'C:\ProgramData\Answer.txt'
+$UiScript    = 'C:\ProgramData\ShowChoice.ps1'
 
-# ========= UI (PowerShell puro; sem C# para desenho) =========
+# Textos do UI
+$TitleText   = 'Atualização obrigatória'
+$MainText    = 'Você pode executar agora ou adiar.'
+$SubText     = 'Escolha uma opção abaixo.'
+
+# Rótulos dos botões
+$BtnNowText  = 'Executar agora'
+$Btn1HText   = 'Adiar 1 hora'
+$Btn2HText   = 'Adiar 2 horas'
+# ============================================
+
+# ========= UI (PowerShell puro; TopMost; sem fechar sem escolha) =========
 $ui = @'
+param(
+  [string]$TitleText,
+  [string]$MainText,
+  [string]$SubText,
+  [string]$BtnNowText,
+  [string]$Btn1HText,
+  [string]$Btn2HText
+)
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# --- mover janela sem borda (C# mínimo e sem Drawing) ---
+# mover janela sem borda
 if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.Move', $false) } | ? { $_ })) {
   Add-Type -TypeDefinition @"
 using System;
@@ -28,7 +48,6 @@ namespace GDL.Win {
 "@
 }
 
-# --- função PS p/ criar Region arredondada (sem C# Drawing2D) ---
 function New-RoundRegion {
   param([int]$Width,[int]$Height,[int]$Radius)
   $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -50,17 +69,31 @@ $accent  = [System.Drawing.Color]::FromArgb(0,120,212)
 $text    = [System.Drawing.Color]::FromArgb(230,230,235)
 $subtext = [System.Drawing.Color]::FromArgb(180,180,190)
 
+# Controle de encerramento: só fecha se houve escolha
+$script:ChoiceMade = $false
+
 # Form
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Agendamento'
+$form.Text = $TitleText
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(520,240)
-$form.TopMost = $true
+$form.TopMost = $true                        # sempre na frente
+$form.ShowInTaskbar = $false
 $form.BackColor = $bg
 $form.FormBorderStyle = 'None'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$form.KeyPreview = $true
 
-# Title
+# bloqueia ESC e Alt+F4
+$form.Add_KeyDown({ param($s,$e)
+  if ($e.KeyCode -eq 'Escape') { $e.Handled = $true }
+})
+$form.Add_FormClosing({
+  param($s,[System.Windows.Forms.FormClosingEventArgs]$e)
+  if (-not $script:ChoiceMade) { $e.Cancel = $true }
+})
+
+# Title (sem botão fechar)
 $title = New-Object System.Windows.Forms.Panel
 $title.Height = 42; $title.Dock = 'Top'; $title.BackColor = $panelBg
 $form.Controls.Add($title)
@@ -72,24 +105,12 @@ $title.Add_MouseDown({ param($s,$e)
 })
 
 $lbl = New-Object System.Windows.Forms.Label
-$lbl.Text = 'Atualização obrigatória'
+$lbl.Text = $TitleText
 $lbl.AutoSize = $true
 $lbl.ForeColor = $text
 $lbl.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
 $lbl.Location = New-Object System.Drawing.Point(14,10)
 $title.Controls.Add($lbl)
-
-$btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Text = '×'
-$btnClose.Width=36; $btnClose.Height=28
-$btnClose.FlatStyle='Flat'; $btnClose.FlatAppearance.BorderSize=0
-$btnClose.BackColor=$panelBg; $btnClose.ForeColor=$subtext
-$btnClose.Anchor='Top,Right'
-$title.Controls.Add($btnClose)
-$placeClose = { $btnClose.Location = New-Object System.Drawing.Point( ($form.ClientSize.Width - $btnClose.Width - 8), 7) }
-& $placeClose
-$title.Add_SizeChanged($placeClose)
-$btnClose.Add_Click({ $form.Close() })
 
 # Corpo
 $body = New-Object System.Windows.Forms.Panel
@@ -97,13 +118,13 @@ $body.Dock='Fill'; $body.Padding='20,16,20,20'; $body.BackColor=$bg
 $form.Controls.Add($body)
 
 $lbl1 = New-Object System.Windows.Forms.Label
-$lbl1.Text = 'Você pode executar agora ou adiar.'
+$lbl1.Text = $MainText
 $lbl1.ForeColor=$text; $lbl1.Font=New-Object System.Drawing.Font('Segoe UI Semibold',12)
 $lbl1.AutoSize=$true; $lbl1.Location=New-Object System.Drawing.Point(8,8)
 $body.Controls.Add($lbl1)
 
 $lbl2 = New-Object System.Windows.Forms.Label
-$lbl2.Text = 'Escolha uma opção abaixo.'
+$lbl2.Text = $SubText
 $lbl2.ForeColor=$subtext; $lbl2.Font=New-Object System.Drawing.Font('Segoe UI',9)
 $lbl2.AutoSize=$true; $lbl2.Location=New-Object System.Drawing.Point(8,36)
 $body.Controls.Add($lbl2)
@@ -126,12 +147,13 @@ function New-ChoiceButton([string]$text,[System.Drawing.Color]$bgColor,[System.D
 
 function Write-Answer([string]$val){
   try { [System.IO.File]::WriteAllText('[[ANSWERFILE]]',$val,[Text.Encoding]::UTF8) } catch {}
+  $script:ChoiceMade = $true
   $form.Close()
 }
 
-$btnNow = New-ChoiceButton 'Executar agora' $accent ([System.Drawing.Color]::White)
-$btn1H  = New-ChoiceButton 'Adiar 1 hora' ([System.Drawing.Color]::FromArgb(58,58,66)) $text
-$btn2H  = New-ChoiceButton 'Adiar 2 horas' ([System.Drawing.Color]::FromArgb(58,58,66)) $text
+$btnNow = New-ChoiceButton $BtnNowText  $accent ([System.Drawing.Color]::White)
+$btn1H  = New-ChoiceButton $Btn1HText  ([System.Drawing.Color]::FromArgb(58,58,66)) $text
+$btn2H  = New-ChoiceButton $Btn2HText  ([System.Drawing.Color]::FromArgb(58,58,66)) $text
 
 $btnNow.Add_Click({ Write-Answer 'NOW' })
 $btn1H.Add_Click({ Write-Answer '1H' })
@@ -143,19 +165,19 @@ $flow.Controls.AddRange(@($btnNow,$btn1H,$btn2H))
 $form.Add_Shown({ $form.Region = New-RoundRegion $form.Width $form.Height 18 })
 $form.Add_SizeChanged({ $form.Region = New-RoundRegion $form.Width $form.Height 18 })
 
-# ESC fecha
-$form.KeyPreview=$true
-$form.Add_KeyDown({ param($s,$e) if($e.KeyCode -eq 'Escape'){ $form.Close() } })
-
 [void][System.Windows.Forms.Application]::Run($form)
 '@
 
-# grava UI com caminho
-if (-not (Test-Path (Split-Path $UiScript))) { New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force | Out-Null }
-Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
+# grava UI com caminho do arquivo
+$ui = $ui.Replace('[[ANSWERFILE]]', $AnswerFile)
+
+# garante pasta
+$dir = Split-Path $UiScript
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
 
 # ========= BROADCAST (todas as sessões) =========
-# C# SOMENTE para lançar em sessões (sem Drawing)
+# C# apenas para lançar processo nas sessões (sem System.Drawing)
 $launcherLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Broadcast.AllSessions', $false) } | ? { $_ }
 if (-not $launcherLoaded) {
   $src = @"
@@ -271,21 +293,30 @@ namespace GDL.Broadcast {
   Add-Type -TypeDefinition $src -Language CSharp
 }
 
-# Subir TermService ajuda o WTS
+# Sobe TermService (para WTS fallback)
 try { Start-Service -Name TermService -ErrorAction SilentlyContinue | Out-Null } catch {}
 
 # PowerShell 64-bit (caso host 32-bit)
 $PS64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $PS64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
-# grava UI
-Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
+# grava UI no disco
+$null = New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force -ErrorAction SilentlyContinue
+Set-Content -Path $UiScript -Value $ui -Encoding UTF8 -Force
 
-# comando a lançar
-$psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$UiScript`""
-$cmd    = "`"$PS64`" $psArgs"
+# monta comando por sessão, passando os textos como parâmetros
+$psArgs = @(
+  '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$UiScript`"",
+  '-TitleText',"`"$TitleText`"",
+  '-MainText',"`"$MainText`"",
+  '-SubText',"`"$SubText`"",
+  '-BtnNowText',"`"$BtnNowText`"",
+  '-Btn1HText',"`"$Btn1HText`"",
+  '-Btn2HText',"`"$Btn2HText`""
+) -join ' '
+$cmd = "`"$PS64`" $psArgs"
 
-# sessões via WTS + sessões com explorer
+# descobre sessões via WTS + sessões com explorer
 $wts = [GDL.Broadcast.Native]::EnumerateSessions() | % { $_.Item1 } | Select-Object -Unique
 $exp = [GDL.Broadcast.AllSessions]::ExplorerSessions()
 $sessions = ($wts + $exp) | Select-Object -Unique | Sort-Object
