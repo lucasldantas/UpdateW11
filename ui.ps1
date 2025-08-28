@@ -56,6 +56,6 @@ foreach ($session in $activeSessions) {
         schtasks /Create /TN "ShowFormTask_$sessionId" /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScriptPath`"" /SC ONCE /ST 00:00 /RU "INTERACTIVE" /RL HIGHEST /F /IT
         schtasks /Run /TN "ShowFormTask_$sessionId"
     } catch {
-        Write-Warning "Falha ao agendar tarefa para sessão $sessionId: $_"
+        Write-Warning "Falha ao agendar tarefa para sessão ${sessionId}: $_"
     }
 }
