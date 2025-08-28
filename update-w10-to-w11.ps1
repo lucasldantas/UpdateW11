@@ -1,126 +1,109 @@
-############################### Script de Update Windows 10 -> Windows 11 ###############################
-#====================================================================
-# Atualização com UI (agendamento/contagem), ISO reaproveitada (>=5GB),
-# montagem preferencial em X:, UI na sessão do usuário atual via schtasks
-# com wrapper .CMD para garantir quotes/redirecionamento corretos.
-# Logs: C:\Temp\UpdateW11\ui.log  e  C:\Temp\UpdateW11\ui_task.log
-#====================================================================
-
 #requires -version 5.1
 param(
-  [switch]$ShowPromptOnly,  # usado pela tarefa para abrir SOMENTE a primeira UI
-  [switch]$ShowForcedOnly   # usado pela tarefa para abrir SOMENTE a UI obrigatória (countdown)
+  [switch]$RePrompt,           # (interno) abre SOMENTE a UI de escolha (NOW/1h/2h)
+  [switch]$ForcedPromptOnly    # (interno) abre SOMENTE a UI obrigatória (countdown)
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# ----------------- CHECAGEM DO SISTEMA OPERACIONAL -----------------
-$osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
-if ($osCaption -match "Windows 11") {
-  Write-Host "✅ Já está no Windows 11. Nenhuma ação será tomada."
-  if (-not ($ShowPromptOnly -or $ShowForcedOnly)) { exit 0 }
-} elseif ($osCaption -notmatch "Windows 10") {
-  Write-Host "⚠ Sistema não é Windows 10 nem 11. Abortando."
-  if (-not ($ShowPromptOnly -or $ShowForcedOnly)) { exit 1 }
-} else {
-  if (-not ($ShowPromptOnly -or $ShowForcedOnly)) {
-    Write-Host "▶ Sistema Windows 10 detectado. Continuando com o update..."
-  }
-}
+# ==================== TEXTOS / RÓTULOS ====================
+$Txt_WindowTitle          = 'Agendar Execução'
+$Txt_HeaderTitle          = 'Atualização Obrigatória'
+$Txt_HeaderSubtitle       = 'Você pode executar agora ou adiar por até 2 horas.'
+$Txt_ActionLabel          = 'Ação:'
+$Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11'
+$Txt_ActionLine2          = 'Tempo Estimado: 20 a 30 minutos'
+$Txt_BtnNow               = 'Executar agora'
+$Txt_BtnDelay1            = 'Adiar 1 hora'
+$Txt_BtnDelay2            = 'Adiar 2 horas'
+# ==========================================================
 
-# ----------------- BASE EM TEMP -----------------
+# ==================== CAMINHOS ====================
 $BaseTemp   = 'C:\Temp\UpdateW11'
-if (-not (Test-Path $BaseTemp)) { New-Item -Path $BaseTemp -ItemType Directory -Force | Out-Null }
+$AnswerPath = 'C:\ProgramData\answer.txt'             # NOW / 3600 / 7200
+$WrapperCmd = 'C:\ProgramData\launch_ui_prompt.cmd'   # wrapper para o /TR
+$TaskLog    = 'C:\ProgramData\ui_task.log'            # stdout/stderr da tarefa
 
-$AnswerPath = Join-Path $BaseTemp 'answer.txt'         # NOW / 3600 / 7200
-$UiLogPath  = Join-Path $BaseTemp 'ui.log'
-$TaskLog    = Join-Path $BaseTemp 'ui_task.log'
+foreach ($p in @('C:\ProgramData', $BaseTemp)) { if (-not (Test-Path $p)) { New-Item -Path $p -ItemType Directory -Force | Out-Null } }
 
-# ----------------- LOG SIMPLES -----------------
-function Write-UiLog([string]$msg) {
-  try {
-    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Add-Content -Path $UiLogPath -Value "[$ts] $msg"
-  } catch {}
-}
+# ==================== SO CHECK ====================
+$osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
+if ($osCaption -match 'Windows 11') { Write-Host '✅ Já está no Windows 11. Nenhuma ação será tomada.'; if (-not ($RePrompt -or $ForcedPromptOnly)) { exit 0 } }
+elseif ($osCaption -notmatch 'Windows 10') { Write-Host '⚠ Sistema não é Windows 10 nem 11. Abortando.'; if (-not ($RePrompt -or $ForcedPromptOnly)) { exit 1 } }
+else { if (-not ($RePrompt -or $ForcedPromptOnly)) { Write-Host '▶ Sistema Windows 10 detectado. Continuando com o update...' } }
 
-# ----------------- HELPERS -----------------
-function Write-Answer([string]$text) {
-  try {
-    $dir = Split-Path -Path $AnswerPath -Parent
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8)
-    Write-UiLog "Write-Answer: $text"
-  } catch {}
+# ==================== HELPERS ====================
+function Save-Answer([string]$text){
+  try { [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
 }
 function Read-Answer {
   try {
-    if (Test-Path $AnswerPath) {
-      $v = ([IO.File]::ReadAllText($AnswerPath,[Text.Encoding]::UTF8)).Trim()
-      if ($v) { Write-UiLog "Read-Answer: $v" }
-      return $v
-    }
+    if (Test-Path $AnswerPath) { return ([IO.File]::ReadAllText($AnswerPath,[Text.Encoding]::UTF8)).Trim() }
   } catch {}
   return $null
 }
 
-function Invoke-InSTA([ScriptBlock]$ScriptToRun) {
-  # Garante STA; janela visível
-  $PsExeFull = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-    $tmp = [IO.Path]::GetTempFileName().Replace(".tmp",".ps1")
-    [IO.File]::WriteAllText($tmp, $ScriptToRun.ToString(), [Text.Encoding]::UTF8)
-    Write-UiLog "Invoke-InSTA: relaunching in -STA ($tmp)"
-    Start-Process -FilePath $PsExeFull -ArgumentList @(
-      '-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Normal','-File', $tmp
-    ) -Wait | Out-Null
-    Remove-Item $tmp -ErrorAction SilentlyContinue
-    return $true
-  } else {
-    try { & $ScriptToRun }
-    catch {
-      Write-UiLog ("Invoke-InSTA inner error: " + $_.Exception.Message)
-      Start-Sleep -Seconds 3
+# Descobrir o usuário interativo ativo (corrige WORKGROUP -> NomeDoPC)
+function Get-ActiveInteractiveUser {
+  $res = [ordered]@{ User=$null; Domain=$null; EffectiveDomain=$null; RU=$null; SessionId=$null }
+  $quser = try { & quser 2>$null } catch { $null }
+  if ($quser) {
+    $line = ($quser -split "`r?`n" | Where-Object { $_ -match '(?i)\s(Active|Ativo)\s' } | Select-Object -First 1)
+    if ($line) {
+      $tokens = ($line -replace '^\s*>\s*','') -split '\s+'
+      $userTok = $tokens[0]
+      $idTok   = ($tokens | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+      if ($userTok) {
+        if ($userTok -match '\\') { $res.Domain,$res.User = $userTok -split '\\',2 }
+        else { $res.User = $userTok; $res.Domain = $env:USERDOMAIN }
+      }
+      if ($idTok) { $res.SessionId = [int]$idTok }
     }
-    return $false
   }
+  if (-not $res.User) {
+    $ud = try { (Get-CimInstance Win32_ComputerSystem).UserName } catch { $null }
+    if ($ud) {
+      if ($ud -match '\\') { $res.Domain,$res.User = $ud -split '\\',2 }
+      else { $res.User = $ud; $res.Domain = $env:USERDOMAIN }
+    }
+  }
+  $machine = try { (Get-CimInstance Win32_ComputerSystem).Name } catch { $env:COMPUTERNAME }
+  $dom = if ([string]::IsNullOrWhiteSpace($res.Domain) -or $res.Domain -eq 'WORKGROUP') { $machine } else { $res.Domain }
+  $res.EffectiveDomain = $dom
+  if ($res.User) { $res.RU = "$dom\$($res.User)" }
+  return [pscustomobject]$res
 }
 
-# ----------------- UI: PRIMEIRA PERGUNTA (NOW / 1h / 2h) -----------------
+# Garante STA quando exibindo UI diretamente (nos modos -RePrompt / -ForcedPromptOnly)
+$PsExeFull = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+if (($RePrompt -or $ForcedPromptOnly) -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
+  $reArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
+  if ($RePrompt) { $reArgs += '-RePrompt' }
+  if ($ForcedPromptOnly) { $reArgs += '-ForcedPromptOnly' }
+  Start-Process -FilePath $PsExeFull -ArgumentList $reArgs -WindowStyle Normal | Out-Null
+  return
+}
+
+# ==================== UI WPF ====================
+Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
+
 function Show-ChoicePrompt {
-  $ui = {
-    Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
-
-    $Txt_WindowTitle='Agendar Execução'
-    $Txt_HeaderTitle='Atualização Obrigatória'
-    $Txt_HeaderSub='Você pode executar agora ou adiar por até 2 horas.'
-    $Txt_ActionLabel='Ação:'
-    $Txt_ActionLine1='Realizar o update do Windows 10 para o Windows 11'
-    $Txt_ActionLine2='Tempo Estimado: 20 a 30 minutos'
-    $Txt_BtnNow='Executar agora'
-    $Txt_BtnDelay1='Adiar 1 hora'
-    $Txt_BtnDelay2='Adiar 2 horas'
-
-    [xml]$xaml = @"
+  [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="$Txt_WindowTitle"
-        Width="520" MinHeight="300" SizeToContent="Height"
-        WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize" Background="#0f172a"
+        Title="$Txt_WindowTitle" Width="520" MinHeight="300" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#0f172a"
         WindowStyle="None" ShowInTaskbar="True">
   <Grid Margin="16">
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/><RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
     <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
       <StackPanel>
         <TextBlock Text="$Txt_HeaderTitle" Foreground="#e5e7eb" FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
-        <TextBlock Text="$Txt_HeaderSub" Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
+        <TextBlock Text="$Txt_HeaderSubtitle" Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
       </StackPanel>
     </Border>
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
@@ -132,7 +115,7 @@ function Show-ChoicePrompt {
     </Border>
     <DockPanel Grid.Row="3">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-        <Button Name="BtnNow" Content="$Txt_BtnNow" Margin="8,0,0,0" Padding="16,8" Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold" BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnNow"    Content="$Txt_BtnNow"    Margin="8,0,0,0" Padding="16,8" Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold" BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
         <Button Name="BtnDelay1" Content="$Txt_BtnDelay1" Margin="8,0,0,0" Padding="16,8" Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI" BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
         <Button Name="BtnDelay2" Content="$Txt_BtnDelay2" Margin="8,0,0,0" Padding="16,8" Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI" BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
       </StackPanel>
@@ -140,72 +123,51 @@ function Show-ChoicePrompt {
   </Grid>
 </Window>
 "@
-    $reader = New-Object System.Xml.XmlNodeReader $xaml
-    $window = [Windows.Markup.XamlReader]::Load($reader)
-    if (-not $window) { throw "Falha ao carregar a UI (ChoicePrompt)." }
+  $reader = New-Object System.Xml.XmlNodeReader $xaml
+  $window = [Windows.Markup.XamlReader]::Load($reader)
+  if (-not $window) { throw 'Falha ao carregar a UI (Choice).' }
 
-    $window.Topmost = $true
-    $window.Add_Loaded({ try { $this.Activate() | Out-Null } catch {} })
+  $window.Topmost = $true
+  $window.Add_Loaded({ try { $this.Activate() | Out-Null } catch {} })
+  $window.Add_MouseLeftButtonDown({ if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed){ try { $window.DragMove() } catch {} } })
 
-    $BtnNow    = $window.FindName('BtnNow')
-    $BtnDelay1 = $window.FindName('BtnDelay1')
-    $BtnDelay2 = $window.FindName('BtnDelay2')
+  $BtnNow    = $window.FindName('BtnNow')
+  $BtnDelay1 = $window.FindName('BtnDelay1')
+  $BtnDelay2 = $window.FindName('BtnDelay2')
 
-    $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
-    $window.add_Closing($script:closingHandler)
-    function Allow-Close([System.Windows.Window]$w){ if ($w -and $script:closingHandler){ $w.remove_Closing($script:closingHandler) } }
+  $closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
+  $window.add_Closing($closingHandler)
+  function Allow-Close([System.Windows.Window]$w){ if ($w -and $closingHandler){ $w.remove_Closing($closingHandler) } }
 
-    $BtnNow.add_Click({ Write-Answer 'NOW';   Allow-Close $window; $window.Close() })
-    $BtnDelay1.add_Click({ Write-Answer '3600'; Allow-Close $window; $window.Close() })
-    $BtnDelay2.add_Click({ Write-Answer '7200'; Allow-Close $window; $window.Close() })
+  $BtnNow.add_Click(   { Save-Answer 'NOW';   Allow-Close $window; $window.Close() })
+  $BtnDelay1.add_Click({ Save-Answer '3600';  Allow-Close $window; $window.Close() })
+  $BtnDelay2.add_Click({ Save-Answer '7200';  Allow-Close $window; $window.Close() })
 
-    Start-Sleep -Milliseconds 300
-    $null = $window.ShowDialog()
-  }
-  Invoke-InSTA $ui | Out-Null
+  $null = $window.ShowDialog()
 }
 
-# ----------------- UI: COUNTDOWN OBRIGATÓRIO -----------------
 function Show-ForcedPrompt {
-  $ui = {
-    Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
-
-    $Txt_WindowTitle='Agendar Execução'
-    $Txt_HeaderTitle='Atualização Obrigatória'
-    $Txt_HeaderSub='Chegou a hora agendada. A execução é obrigatória.'
-    $Txt_ActionLabel='Ação:'
-    $Txt_ActionLine1='Realizar o update do Windows 10 para o Windows 11'
-    $Txt_ActionLine2='Tempo Estimado: 20 a 30 minutos'
-    $Txt_BtnNow='Executar agora'
-    $TotalSeconds=300
-
-    [xml]$xaml = @"
+  $TotalSeconds = 300
+  [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="$Txt_WindowTitle"
-        Width="560" MinHeight="300" SizeToContent="Height"
-        WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize" Background="#0f172a"
+        Title="$Txt_WindowTitle" Width="560" MinHeight="300" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#0f172a"
         WindowStyle="None" ShowInTaskbar="True">
   <Grid Margin="16">
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/><RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
     <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
       <StackPanel>
         <TextBlock Text="$Txt_HeaderTitle" Foreground="#e5e7eb" FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
-        <TextBlock Text="$Txt_HeaderSub" Foreground="#f87171" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
+        <TextBlock Text="Chegou a hora agendada. A execução é obrigatória." Foreground="#f87171" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
       </StackPanel>
     </Border>
     <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
       <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="220"/>
-        </Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Margin="0,0,12,0">
           <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
           <TextBlock Text="$Txt_ActionLine1" Foreground="#94a3b8" FontFamily="Consolas" FontSize="14" Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
@@ -213,9 +175,9 @@ function Show-ForcedPrompt {
         </StackPanel>
         <Border Grid.Column="1" Background="#0f172a" CornerRadius="12" Padding="12">
           <StackPanel>
-            <TextBlock Text="Início automático em:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="12" />
+            <TextBlock Text="Início automático em:" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="12"/>
             <TextBlock Name="LblCountdown" Text="05:00" Foreground="#e5e7eb" FontFamily="Segoe UI" FontWeight="Bold" FontSize="28" Margin="0,4,0,10" HorizontalAlignment="Center"/>
-            <ProgressBar Name="PbCountdown" Minimum="0" Maximum="$TotalSeconds" Height="16" Foreground="#22c55e" Background="#1f2937" BorderBrush="#111827" Value="0" />
+            <ProgressBar Name="PbCountdown" Minimum="0" Maximum="$TotalSeconds" Height="16" Foreground="#22c55e" Background="#1f2937" BorderBrush="#111827" Value="0"/>
             <TextBlock Text="Se nada for escolhido, será executado automaticamente." Foreground="#94a3b8" FontFamily="Segoe UI" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"/>
           </StackPanel>
         </Border>
@@ -229,176 +191,98 @@ function Show-ForcedPrompt {
   </Grid>
 </Window>
 "@
-    $reader = New-Object System.Xml.XmlNodeReader $xaml
-    $window = [Windows.Markup.XamlReader]::Load($reader)
-    if (-not $window) { throw "Falha ao carregar a UI (ForcedPrompt)." }
+  $reader = New-Object System.Xml.XmlNodeReader $xaml
+  $window = [Windows.Markup.XamlReader]::Load($reader)
+  if (-not $window) { throw 'Falha ao carregar a UI (Forced).' }
 
-    $window.Topmost = $true
-    $window.Add_Loaded({ try { $this.Activate() | Out-Null } catch {} })
+  $window.Topmost = $true
+  $window.Add_Loaded({ try { $this.Activate() | Out-Null } catch {} })
+  $window.Add_MouseLeftButtonDown({ if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed){ try { $window.DragMove() } catch {} } })
 
-    $BtnNow       = $window.FindName('BtnNow')
-    $LblCountdown = $window.FindName('LblCountdown')
-    $PbCountdown  = $window.FindName('PbCountdown')
+  $BtnNow       = $window.FindName('BtnNow')
+  $LblCountdown = $window.FindName('LblCountdown')
+  $PbCountdown  = $window.FindName('PbCountdown')
 
-    $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
-    $window.add_Closing($script:closingHandler)
-    function Allow-Close([System.Windows.Window]$w){ if ($w -and $script:closingHandler){ $w.remove_Closing($script:closingHandler) } }
+  $closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
+  $window.add_Closing($closingHandler)
+  function Allow-Close([System.Windows.Window]$w){ if ($w -and $closingHandler){ $w.remove_Closing($closingHandler) } }
 
-    $script:done = $false
-    function Execute-Now {
-      if ($script:done) { return }
-      $script:done = $true
-      try { $timer.Stop() } catch {}
-      Write-Answer 'NOW'
-      Allow-Close $window
-      $window.Close()
-    }
+  $done = $false
+  function Execute-Now {
+    if ($done) { return }
+    $script:done = $true
+    try { $timer.Stop() } catch {}
+    Save-Answer 'NOW'
+    Allow-Close $window
+    $window.Close()
+  }
 
-    $BtnNow.add_Click({ Execute-Now })
-    $window.Add_KeyDown({ if ($_.Key -eq 'Enter') { Execute-Now } })
+  $BtnNow.add_Click({ Execute-Now })
+  $window.Add_KeyDown({ if ($_.Key -eq 'Enter') { Execute-Now } })
 
-    $script:remaining = $TotalSeconds
-    $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromSeconds(1)
+  $script:remaining = $TotalSeconds
+  $timer = New-Object System.Windows.Threading.DispatcherTimer
+  $timer.Interval = [TimeSpan]::FromSeconds(1)
 
-    $updateUi = {
-      $mm = [Math]::Floor($script:remaining / 60)
-      $ss = $script:remaining % 60
-      $LblCountdown.Text = ('{0:00}:{1:00}' -f $mm, $ss)
-      $PbCountdown.Value = $TotalSeconds - $script:remaining
-    }
+  $updateUi = {
+    $mm = [Math]::Floor($script:remaining / 60)
+    $ss = $script:remaining % 60
+    $LblCountdown.Text = ('{0:00}:{1:00}' -f $mm, $ss)
+    $PbCountdown.Value = $TotalSeconds - $script:remaining
+  }
 
+  & $updateUi
+  $timer.Add_Tick({
+    if ($script:remaining -le 0) { Execute-Now; return }
+    $script:remaining--
     & $updateUi
-    $timer.Add_Tick({
-      if ($script:remaining -le 0) { Execute-Now; return }
-      $script:remaining--
-      & $updateUi
-    })
-    $timer.Start()
+  })
+  $timer.Start()
 
-    Start-Sleep -Milliseconds 300
-    $null = $window.ShowDialog()
-  }
-  Invoke-InSTA $ui | Out-Null
+  $null = $window.ShowDialog()
 }
 
-# ----------------- DESCOBRIR USUÁRIO/SID/SESSÃO ATIVOS -----------------
-function Get-ActiveLogon {
-  $result = [ordered]@{
-    User=$null; Domain=$null; EffectiveDomain=$null; UserDomain=$null
-    SID=$null; SessionId=$null
-  }
+# ==================== EXECUTAR UI NA SESSÃO DO USUÁRIO ATIVO (via Tarefa) ====================
+function Start-UiForActiveUser([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
+  $who = Get-ActiveInteractiveUser
+  if (-not $who.RU) { Write-Host '⚠ Nenhum usuário interativo ativo encontrado.'; return $false }
+  Write-Host "👤 Usuário ativo: $($who.RU)  (SessãoID=$($who.SessionId))"
 
-  $quser = (& quser 2>$null)
-  if ($quser) {
-    $lines = $quser -split "`r?`n" | Where-Object { $_ -match '\s+(Active|Ativo)\s' }
-    if ($lines) {
-      $line = $lines | Select-Object -First 1
-      $parts = ($line -replace '^\s*>\s*','') -split '\s+'
-      $userToken = $parts[0]
-      $idToken   = ($parts | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
-      if ($userToken) {
-        if ($userToken -match '\\') {
-          $result.UserDomain = $userToken
-          $result.Domain,$result.User = $userToken -split '\\',2
-        } else {
-          $result.User = $userToken
-          $result.Domain = $env:USERDOMAIN
-          $result.UserDomain = "$($result.Domain)\$($result.User)"
-        }
-      }
-      if ($idToken) { $result.SessionId = [int]$idToken }
-    }
-  }
-
-  if (-not $result.UserDomain) {
-    $ud = (Get-CimInstance Win32_ComputerSystem).UserName
-    if ($ud) {
-      $result.UserDomain = $ud
-      $result.Domain,$result.User = $ud -split '\\',2
-    }
-  }
-
-  $machine = (Get-CimInstance Win32_ComputerSystem).Name
-  $domain  = $result.Domain
-  if (-not $domain -or $domain -eq 'WORKGROUP') { $domain = $machine }
-  $result.EffectiveDomain = $domain
-
-  if ($result.User) {
-    try {
-      $nt = New-Object System.Security.Principal.NTAccount("$($result.EffectiveDomain)\$($result.User)")
-      $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier])
-      $result.SID = $sid.Value
-    } catch { $result.SID = $null }
-  }
-
-  return [pscustomobject]$result
-}
-
-# ----------------- EXECUTAR UI NA SESSÃO ATIVA (com wrapper .CMD) -----------------
-function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$TimeoutSec = 900) {
-  $info = Get-ActiveLogon
-  if (-not $info.User -or -not $info.EffectiveDomain) {
-    Write-Host "⚠ Nenhum usuário ativo encontrado. Não será possível exibir UI." -ForegroundColor Yellow
-    Write-UiLog "Start-UiInActiveSession: nenhum usuário ativo"
-    return $false
-  }
-
-  $ru = "$($info.EffectiveDomain)\$($info.User)"  # PC\user (workgroup) ou DOM\user (AD)
-  Write-Host "👤 Usuário ativo: $ru  (SessãoID=$($info.SessionId))"
-  Write-UiLog  "Usuário ativo: $ru | SessãoID=$($info.SessionId)"
-
-  $taskName = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
-
-  # Garante script físico quando rodou via IEX
+  # Caminho físico do script: se rodou via IEX, persistimos este conteúdo
   $psPath = $PSCommandPath
   if (-not $psPath) {
-    $psPath = Join-Path $BaseTemp "UpdateW11_Run.ps1"
+    $psPath = Join-Path $BaseTemp 'UpdateW11_UI.ps1'
     $self = $MyInvocation.MyCommand.Definition
     [IO.File]::WriteAllText($psPath, $self, [Text.Encoding]::UTF8)
-    Write-UiLog "PSCommandPath inexistente; script salvo em $psPath"
   }
 
-  $argSwitch = if ($Mode -eq 'choice') { '-ShowPromptOnly' } else { '-ShowForcedOnly' }
+  # Wrapper .CMD para o /TR (sem briga de aspas). Registra saída no TaskLog.
+  $argSwitch = if ($Mode -eq 'choice') { '-RePrompt' } else { '-ForcedPromptOnly' }
   $psExe     = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-
-  # Cria um wrapper .CMD para evitar problemas de aspas/escapes no /TR
-  $wrapperPath = Join-Path $BaseTemp ("launch_ui_{0}.cmd" -f $Mode)
-  $wrapper = @(
+  $wrapper   = @(
     '@echo off'
     'setlocal'
     ('"{0}" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Normal -File "{1}" {2} >> "{3}" 2>>&1' -f $psExe, $psPath, $argSwitch, $TaskLog)
   ) -join "`r`n"
-  [IO.File]::WriteAllText($wrapperPath, $wrapper, [Text.Encoding]::ASCII)
+  [IO.File]::WriteAllText($WrapperCmd, $wrapper, [Text.Encoding]::ASCII)
 
-  # /SC ONCE pede horário futuro: agora +2 min
+  $taskName  = "\GDL\UpdateW11-UI-$([guid]::NewGuid())"
   $startTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
 
   $createCmd = @(
     '/Create','/TN', $taskName,
     '/SC','ONCE','/ST', $startTime,
-    '/TR', "`"$wrapperPath`"",
-    '/RL','LIMITED',   # evita desktop elevado/UAC
-    '/RU', $ru,
+    '/TR', "`"$WrapperCmd`"",
+    '/RL','LIMITED',            # evita desktop elevado/UAC
+    '/RU', $who.RU,
     '/IT',
     '/F'
   )
 
-  try {
-    schtasks @createCmd | Out-Null
-    Write-UiLog "Tarefa criada: $taskName | RU=$ru | ST=$startTime | TR=$wrapperPath"
-  } catch {
-    Write-UiLog "Falha ao criar tarefa: $($_.Exception.Message)"
-    Write-Host "❌ Falha ao criar tarefa para UI: $($_.Exception.Message)" -ForegroundColor Red
-    return $false
-  }
-
-  # Limpa resposta anterior e dispara a tarefa
-  Remove-Item $AnswerPath -ErrorAction SilentlyContinue
+  # Cria/roda e espera resposta
+  schtasks @createCmd | Out-Null
   schtasks /Run /TN $taskName | Out-Null
-  Write-UiLog "Tarefa executada: $taskName"
 
-  # Espera resposta ou timeout
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
@@ -406,12 +290,10 @@ function Start-UiInActiveSession([ValidateSet('choice','forced')]$Mode, [int]$Ti
   }
 
   schtasks /Delete /TN $taskName /F | Out-Null
-  Write-UiLog "Tarefa deletada: $taskName"
-
   return [bool](Read-Answer)
 }
 
-# ----------------- PASSO 1: Download/Montagem da ISO (corrigido) -----------------
+# ==================== PASSO 1: Download/Montagem da ISO (corrigido) ====================
 function Do-Step1 {
   param(
     [Parameter(Mandatory=$true)][string]$IsoUrl,
@@ -423,7 +305,7 @@ function Do-Step1 {
   New-Item -ItemType Directory -Path $Dest -Force | Out-Null
   $isoPath = Join-Path $Dest $IsoName
 
-  # 0) Se nossa ISO já estiver montada, desmonta (sempre com -ImagePath)
+  # Se nossa ISO já estiver montada, desmonta (sempre com -ImagePath)
   try {
     $imgMine = Get-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue
     if ($imgMine -and $imgMine.Attached) {
@@ -433,30 +315,24 @@ function Do-Step1 {
     }
   } catch {}
 
-  # 1) Verifica/baixa ISO
+  # Verifica/baixa
   $needDownload = $true
   if (Test-Path $isoPath) {
     try {
       $size = (Get-Item $isoPath).Length
-      if ($size -ge $MinSizeBytes) {
-        Write-Host "⚡ ISO válida encontrada em $isoPath — pulando download."
-        $needDownload = $false
-      } else {
-        Write-Host "🧹 ISO existente parece incompleta ($size bytes). Rebaixando..."
-        Remove-Item $isoPath -Force -ErrorAction SilentlyContinue
-      }
+      if ($size -ge $MinSizeBytes) { Write-Host "⚡ ISO válida encontrada em $isoPath — pulando download."; $needDownload = $false }
+      else { Write-Host "🧹 ISO incompleta. Rebaixando..."; Remove-Item $isoPath -Force -ErrorAction SilentlyContinue }
     } catch {}
   }
-
   if ($needDownload) {
-    Write-Host "⏬ Baixando ISO..."
+    Write-Host '⏬ Baixando ISO...'
     Start-BitsTransfer -Source $IsoUrl -Destination $isoPath
     $size = (Get-Item $isoPath).Length
     if ($size -lt $MinSizeBytes) { throw "Download da ISO concluído, porém tamanho inesperado ($size bytes < $MinSizeBytes)." }
     Write-Host "✅ Download OK ($([Math]::Round($size/1GB,2)) GB)."
   }
 
-  # 2) Se X: estiver ocupado por OUTRA coisa, tenta liberar a letra
+  # Se X: estiver ocupado por outra coisa, tenta liberar
   $volX = Get-Volume -DriveLetter X -ErrorAction SilentlyContinue
   if ($volX) {
     try {
@@ -466,19 +342,17 @@ function Do-Step1 {
     } catch {}
   }
 
-  # 3) Monta nossa ISO
-  Write-Host "💿 Montando ISO..."
+  # Monta nossa ISO
+  Write-Host '💿 Montando ISO...'
   Mount-DiskImage -ImagePath $isoPath | Out-Null
 
-  # 4) Descobre a letra e tenta ajustar para X:
+  # Letra atribuída e tentativa de forçar X:
   $img = Get-DiskImage -ImagePath $isoPath
   $vol = $img | Get-Volume
   $assigned = $vol.DriveLetter + ':'
-
   if ($assigned -ne 'X:') {
     try {
-      Get-CimInstance -Class Win32_Volume |
-        Where-Object { $_.DriveLetter -eq $assigned } |
+      Get-CimInstance -Class Win32_Volume | Where-Object { $_.DriveLetter -eq $assigned } |
         Set-CimInstance -Property @{ DriveLetter = 'X:' } -ErrorAction Stop | Out-Null
       $assigned = 'X:'
     } catch {
@@ -486,68 +360,62 @@ function Do-Step1 {
     }
   }
 
-  Write-UiLog "ISO pronta em $assigned (path=$isoPath)"
   Write-Host "✅ ISO pronta em $assigned"
   return $assigned
 }
 
-# ----------------- PASSO 2: Setup.exe -----------------
+# ==================== PASSO 2: Setup.exe ====================
 function Do-Step2 {
   param(
     [string]$Drive = 'X:',
     [string]$LogPath = (Join-Path $BaseTemp 'logs.log')
   )
-  Write-Host "▶ Iniciando atualização do Windows..."
-  Write-UiLog "Start-Process Setup.exe ($Drive)"
+  Write-Host '▶ Iniciando atualização do Windows...'
   $setupArgs = "/auto upgrade /DynamicUpdate disable /ShowOOBE none /noreboot /compat IgnoreWarning /BitLocker TryKeepActive /EULA accept /CopyLogs `"$LogPath`""
   Start-Process -FilePath (Join-Path $Drive 'Setup.exe') -ArgumentList $setupArgs -Wait
-  Write-Host "✔ Instalação iniciada. Reiniciando máquina..."
-  Write-UiLog "Restart-Computer em 10s"
+  Write-Host '✔ Instalação iniciada. Reiniciando máquina...'
   Restart-Computer -Timeout 10 -Force
 }
 
-# ============================== ROTINAS CHAMADAS PELAS TAREFAS ==============================
-if ($ShowPromptOnly) { Write-UiLog "ShowPromptOnly iniciado"; Show-ChoicePrompt;  Write-UiLog "ShowPromptOnly finalizado"; exit 0 }
-if ($ShowForcedOnly) { Write-UiLog "ShowForcedOnly iniciado"; Show-ForcedPrompt; Write-UiLog "ShowForcedOnly finalizado"; exit 0 }
+# ==================== ENTRADAS DOS MODOS INTERNOS (UI direta) ====================
+if ($RePrompt)         { Show-ChoicePrompt;        exit 0 }
+if ($ForcedPromptOnly) { Show-ForcedPrompt;        exit 0 }
 
-# ============================== FLUXO PRINCIPAL ==============================
-$isoUrl  = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
-$driveX  = Do-Step1 -IsoUrl $isoUrl -Dest $BaseTemp
+# ==================== FLUXO PRINCIPAL ====================
+$isoUrl = 'https://temp-arco-itops.s3.us-east-1.amazonaws.com/Win11_24H2_BrazilianPortuguese_x64.iso'
+$driveX = Do-Step1 -IsoUrl $isoUrl -Dest $BaseTemp
 
+# 1) Mostra pergunta NOW/1h/2h para o USUÁRIO ATIVO (a partir de SYSTEM/remoto)
 Remove-Item $AnswerPath -ErrorAction SilentlyContinue
-$shown = Start-UiInActiveSession -Mode 'choice' -TimeoutSec 1800
-if (-not $shown) {
-  Write-Host "⚠ Não foi possível exibir a UI ao usuário atual. Prosseguindo com execução obrigatória."
-  Write-UiLog "Falha ao exibir UI inicial; fallback NOW"
-  Write-Answer 'NOW'
-}
+$shown = Start-UiForActiveUser -Mode 'choice' -TimeoutSec 1800
+if (-not $shown) { Write-Host '⚠ UI não abriu ou sem resposta; prosseguindo NOW.'; Save-Answer 'NOW' }
 
+# 2) Decide
 $choice = Read-Answer
 switch ($choice) {
   'NOW'   {
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
-    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
+    Start-UiForActiveUser -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   '3600'  {
-    Write-Host "⏳ Aguardando 1 hora antes da execução..."; Write-UiLog "Delay 3600s"
+    Write-Host '⏳ Aguardando 1 hora antes da execução...'
     Start-Sleep -Seconds 60
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
-    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
+    Start-UiForActiveUser -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   '7200'  {
-    Write-Host "⏳ Aguardando 2 horas antes da execução..."; Write-UiLog "Delay 7200s"
+    Write-Host '⏳ Aguardando 2 horas antes da execução...'
     Start-Sleep -Seconds 120
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
-    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
+    Start-UiForActiveUser -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
   default {
-    Write-Host "⚠ Resposta inválida ou ausente. Prosseguindo com execução obrigatória."
-    Write-UiLog "Resposta inválida/ausente; executando NOW"
+    Write-Host '⚠ Resposta inválida/ausente; executando NOW.'
     Remove-Item $AnswerPath -ErrorAction SilentlyContinue
-    Start-UiInActiveSession -Mode 'forced' -TimeoutSec 600 | Out-Null
+    Start-UiForActiveUser -Mode 'forced' -TimeoutSec 600 | Out-Null
     Do-Step2 -Drive $driveX
   }
 }
