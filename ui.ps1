@@ -1,8 +1,10 @@
 #requires -version 5.1
+param([switch]$Spawned)  # interno: indica que já estamos no processo destacado
+
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
-# ====================== TEXTOS / VARIÁVEIS EDITÁVEIS ======================
+# ====================== VARIÁVEIS EDITÁVEIS ======================
 $AnswerFile         = 'C:\ProgramData\Answer.txt'
 
 $Txt_WindowTitle    = 'Agendar Execução'
@@ -15,23 +17,27 @@ $Txt_ActionLine2    = 'Tempo Estimado: 20 a 30 minutos'
 $Txt_BtnNow         = 'Executar agora'
 $Txt_Btn1H          = 'Adiar 1 hora'
 $Txt_Btn2H          = 'Adiar 2 horas'
-# ==========================================================================
+# ================================================================
 
-# ---- Garante execução em STA (requisito do WPF) ----
-$psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $psExe = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
-if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-  Start-Process -FilePath $psExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',"`"$PSCommandPath`"") | Out-Null
+# --- evita bloquear sua console: se não for Spawned, relança oculto e sai ---
+if (-not $Spawned) {
+  $psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $psExe = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
+  $self  = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+  Start-Process -FilePath $psExe -ArgumentList @(
+    '-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden',
+    '-File',"`"$self`"","-Spawned"
+  ) -WindowStyle Hidden | Out-Null
   return
 }
 
-# ---- Prepara pasta do arquivo ----
+# --- a partir daqui é só a UI (no processo destacado) ---
+# garante pasta do arquivo
 try {
   $dir = Split-Path -LiteralPath $AnswerFile
   if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 } catch {}
 
-# ---- Carrega WPF ----
 Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
 [xml]$xaml = @"
@@ -50,7 +56,7 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <!-- Cabeçalho retangular (sem cantos arredondados) -->
+    <!-- Cabeçalho (sem cantos arredondados) -->
     <Border Grid.Row="0" Background="#111827" Padding="16">
       <StackPanel>
         <TextBlock Name="TitleText" Text="$Txt_HeaderTitle"
@@ -69,7 +75,7 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
       </StackPanel>
     </Border>
 
-    <!-- Botões retangulares, tamanhos fixos para não "cortar" -->
+    <!-- Botões (retangulares, tamanhos fixos) -->
     <DockPanel Grid.Row="2">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
         <Button Name="BtnNow" Content="$Txt_BtnNow" Margin="8,0,0,0" Padding="16,8"
@@ -87,23 +93,23 @@ Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 </Window>
 "@
 
-# ---- Instancia a janela ----
+# Instancia a janela
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Impede fechar sem escolha (bloqueia Alt+F4)
+# Bloqueia fechar sem escolha (Alt+F4)
 $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
 $window.add_Closing($script:closingHandler)
 function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-# Permite arrastar a janela clicando em qualquer área vazia
+# Arrastar janela
 $window.Add_MouseLeftButtonDown({
   if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
     try { $window.DragMove() } catch {}
   }
 })
 
-# Garante foco na frente de tudo
+# Garante foco/topmost real
 $window.Add_Loaded({
   try {
     $this.Activate() | Out-Null
@@ -114,7 +120,7 @@ $window.Add_Loaded({
   } catch {}
 })
 
-# ---- Botões / Handlers ----
+# Botões
 $BtnNow = $window.FindName('BtnNow')
 $Btn1H  = $window.FindName('Btn1H')
 $Btn2H  = $window.FindName('Btn2H')
@@ -129,5 +135,5 @@ $BtnNow.Add_Click({ Write-Answer 'NOW' })
 $Btn1H.Add_Click({ Write-Answer '1H'  })
 $Btn2H.Add_Click({ Write-Answer '2H'  })
 
-# ---- Exibe ----
+# Exibe
 $null = $window.ShowDialog()
