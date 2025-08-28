@@ -132,19 +132,19 @@ function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closin
 # -------- Eventos (UI thread com Add_Click) --------
 $handlerNow = [System.Windows.RoutedEventHandler]{
   param($s,$e)
-  Save-Answer 'Executar agora'
+  Save-Answer 'NOW'
   Allow-Close $window
   $window.Close()
 }
 $handlerD1 = [System.Windows.RoutedEventHandler]{
   param($s,$e)
-  Save-Answer 'Adiar 1 hora'
+  Save-Answer '3600'
   Allow-Close $window
   $window.Close()
 }
 $handlerD2 = [System.Windows.RoutedEventHandler]{
   param($s,$e)
-  Save-Answer 'Adiar 2 horas'
+  Save-Answer '7200'
   Allow-Close $window
   $window.Close()
 }
