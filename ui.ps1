@@ -6,13 +6,13 @@ $ErrorActionPreference = 'Stop'
 $AnswerFile = 'C:\ProgramData\Answer.txt'
 $UiScript   = 'C:\ProgramData\ShowChoice.ps1'
 
-# ========= UI (sem Paint/owner-draw; estável) =========
+# ========= UI (PowerShell puro; sem C# para desenho) =========
 $ui = @'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# --- helpers para arrastar janela sem borda ---
+# --- mover janela sem borda (C# mínimo e sem Drawing) ---
 if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.Move', $false) } | ? { $_ })) {
   Add-Type -TypeDefinition @"
 using System;
@@ -28,28 +28,19 @@ namespace GDL.Win {
 "@
 }
 
-# --- helper p/ cantos arredondados, sem usar Paint ---
-if (-not ([AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Win.Rounder', $false) } | ? { $_ })) {
-  Add-Type -TypeDefinition @"
-using System.Drawing;
-using System.Drawing.Drawing2D;
-namespace GDL.Win {
-  public static class Rounder {
-    public static Region MakeRoundRegion(int w, int h, int radius){
-      GraphicsPath gp = new GraphicsPath();
-      int d = radius*2;
-      gp.AddArc(0,0,d,d,180,90);
-      gp.AddArc(w-d,0,d,d,270,90);
-      gp.AddArc(w-d,h-d,d,d,0,90);
-      gp.AddArc(0,h-d,d,d,90,90);
-      gp.CloseFigure();
-      Region r = new Region(gp);
-      gp.Dispose();
-      return r;
-    }
-  }
-}
-"@
+# --- função PS p/ criar Region arredondada (sem C# Drawing2D) ---
+function New-RoundRegion {
+  param([int]$Width,[int]$Height,[int]$Radius)
+  $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $d = $Radius * 2
+  $gp.AddArc(0,0,$d,$d,180,90)
+  $gp.AddArc($Width-$d,0,$d,$d,270,90)
+  $gp.AddArc($Width-$d,$Height-$d,$d,$d,0,90)
+  $gp.AddArc(0,$Height-$d,$d,$d,90,90)
+  $gp.CloseFigure()
+  $r = New-Object System.Drawing.Region($gp)
+  $gp.Dispose()
+  return $r
 }
 
 # Paleta
@@ -69,7 +60,7 @@ $form.BackColor = $bg
 $form.FormBorderStyle = 'None'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
-# Titlebar simples (sem Paint)
+# Title
 $title = New-Object System.Windows.Forms.Panel
 $title.Height = 42; $title.Dock = 'Top'; $title.BackColor = $panelBg
 $form.Controls.Add($title)
@@ -95,9 +86,7 @@ $btnClose.FlatStyle='Flat'; $btnClose.FlatAppearance.BorderSize=0
 $btnClose.BackColor=$panelBg; $btnClose.ForeColor=$subtext
 $btnClose.Anchor='Top,Right'
 $title.Controls.Add($btnClose)
-$placeClose = {
-  $btnClose.Location = New-Object System.Drawing.Point( ($form.ClientSize.Width - $btnClose.Width - 8), 7)
-}
+$placeClose = { $btnClose.Location = New-Object System.Drawing.Point( ($form.ClientSize.Width - $btnClose.Width - 8), 7) }
 & $placeClose
 $title.Add_SizeChanged($placeClose)
 $btnClose.Add_Click({ $form.Close() })
@@ -130,12 +119,8 @@ function New-ChoiceButton([string]$text,[System.Drawing.Color]$bgColor,[System.D
   $b.Width=150; $b.Height=40; $b.Margin='8,8,8,8'
   $b.FlatStyle='Flat'; $b.FlatAppearance.BorderSize=0
   $b.BackColor=$bgColor; $b.ForeColor=$fgColor
-  # cantos arredondados (sem Paint)
-  $b.Add_SizeChanged({ param($s,$e)
-    $s.Region = [GDL.Win.Rounder]::MakeRoundRegion($s.Width, $s.Height, 20)
-  })
-  # aplica já
-  $b.Region = [GDL.Win.Rounder]::MakeRoundRegion($b.Width, $b.Height, 20)
+  $b.Add_SizeChanged({ param($s,$e) $s.Region = New-RoundRegion $s.Width $s.Height 20 })
+  $b.Region = New-RoundRegion $b.Width $b.Height 20
   return $b
 }
 
@@ -154,9 +139,9 @@ $btn2H.Add_Click({ Write-Answer '2H' })
 
 $flow.Controls.AddRange(@($btnNow,$btn1H,$btn2H))
 
-# cantos arredondados do form (sem Paint)
-$form.Add_Shown({ $form.Region = [GDL.Win.Rounder]::MakeRoundRegion($form.Width,$form.Height,18) })
-$form.Add_SizeChanged({ $form.Region = [GDL.Win.Rounder]::MakeRoundRegion($form.Width,$form.Height,18) })
+# cantos arredondados do form
+$form.Add_Shown({ $form.Region = New-RoundRegion $form.Width $form.Height 18 })
+$form.Add_SizeChanged({ $form.Region = New-RoundRegion $form.Width $form.Height 18 })
 
 # ESC fecha
 $form.KeyPreview=$true
@@ -165,14 +150,14 @@ $form.Add_KeyDown({ param($s,$e) if($e.KeyCode -eq 'Escape'){ $form.Close() } })
 [void][System.Windows.Forms.Application]::Run($form)
 '@
 
-# grava UI com caminho do arquivo embutido
+# grava UI com caminho
 if (-not (Test-Path (Split-Path $UiScript))) { New-Item -ItemType Directory -Path (Split-Path $UiScript) -Force | Out-Null }
 Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
 
-# ========= BROADCAST PARA TODAS AS SESSÕES =========
-# Carrega launcher (único por processo) – usa explorer.exe por sessão; fallback WTS (SYSTEM)
-$launcherType = [AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Broadcast.AllSessions', $false) } | ? { $_ }
-if (-not $launcherType) {
+# ========= BROADCAST (todas as sessões) =========
+# C# SOMENTE para lançar em sessões (sem Drawing)
+$launcherLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | % { $_.GetType('GDL.Broadcast.AllSessions', $false) } | ? { $_ }
+if (-not $launcherLoaded) {
   $src = @"
 using System;
 using System.Diagnostics;
@@ -193,10 +178,7 @@ namespace GDL.Broadcast {
   [StructLayout(LayoutKind.Sequential)]
   public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
 
-  public enum WTS_CONNECTSTATE_CLASS {
-    Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init
-  }
-
+  public enum WTS_CONNECTSTATE_CLASS { Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init }
   [StructLayout(LayoutKind.Sequential)]
   public struct WTS_SESSION_INFO {
     public Int32 SessionID;
@@ -222,9 +204,7 @@ namespace GDL.Broadcast {
     public const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     public const UInt32 PROCESS_QUERY_INFORMATION = 0x0400;
     public const UInt32 TOKEN_QUERY = 0x0008;
-    public const UInt32 TOKEN_DUPLICATE = 0x0002;
     public const UInt32 TOKEN_ASSIGN_PRIMARY = 0x0001;
-    public const UInt32 TOKEN_ALL_ACCESS = 0xF01FF;
     public const UInt32 LOGON_WITH_PROFILE = 0x00000001;
     public const UInt32 CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     public const UInt32 CREATE_NEW_CONSOLE = 0x00000010;
@@ -263,13 +243,10 @@ namespace GDL.Broadcast {
     public static bool LaunchViaWTS(uint sessionId, string cmdLine) {
       IntPtr userToken;
       if (!WTSQueryUserToken(sessionId, out userToken)) return false;
-
-      IntPtr env;
-      CreateEnvironmentBlock(out env, userToken, false);
+      IntPtr env; CreateEnvironmentBlock(out env, userToken, false);
       STARTUPINFO si = new STARTUPINFO();
       si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
       si.lpDesktop = @"winsta0\default";
-
       PROCESS_INFORMATION pi;
       bool ok = CreateProcessAsUser(userToken, null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, env, null, ref si, out pi);
       if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
@@ -284,13 +261,9 @@ namespace GDL.Broadcast {
       return Process.GetProcessesByName("explorer").Select(p => (uint)p.SessionId).Distinct();
     }
     public static bool LaunchInSession(uint sessionId, string cmdLine) {
-      // tenta via explorer.exe dessa sessão
-      var anyExplorer = Process.GetProcessesByName("explorer").Where(p => (uint)p.SessionId == sessionId).FirstOrDefault();
-      if (anyExplorer != null) {
-        if (Native.LaunchWithExplorerToken(anyExplorer.Id, cmdLine)) return true;
-      }
-      // fallback WTS (requer SYSTEM)
-      return Native.LaunchViaWTS(sessionId, cmdLine);
+      var exp = Process.GetProcessesByName("explorer").FirstOrDefault(p => (uint)p.SessionId == sessionId);
+      if (exp != null && Native.LaunchWithExplorerToken(exp.Id, cmdLine)) return true;
+      return Native.LaunchViaWTS(sessionId, cmdLine); // requer SYSTEM
     }
   }
 }
@@ -298,39 +271,34 @@ namespace GDL.Broadcast {
   Add-Type -TypeDefinition $src -Language CSharp
 }
 
-# Garante TermService pronto (para WTS fallback)
+# Subir TermService ajuda o WTS
 try { Start-Service -Name TermService -ErrorAction SilentlyContinue | Out-Null } catch {}
 
 # PowerShell 64-bit (caso host 32-bit)
 $PS64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $PS64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
 
-# Monta comando que cada sessão vai executar
+# grava UI
+Set-Content -Path $UiScript -Value ($ui.Replace('[[ANSWERFILE]]', $AnswerFile)) -Encoding UTF8 -Force
+
+# comando a lançar
 $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$UiScript`""
 $cmd    = "`"$PS64`" $psArgs"
 
-# Descobre TODAS as sessões: via WTS + via explorer.exe
-$wtsSessions = [GDL.Broadcast.Native]::EnumerateSessions() | % { [pscustomobject]@{ Id=$_.Item1; State=$_.Item2 } }
-$expSessions = [GDL.Broadcast.AllSessions]::ExplorerSessions() | % { [pscustomobject]@{ Id=$_; State='Explorer' } }
+# sessões via WTS + sessões com explorer
+$wts = [GDL.Broadcast.Native]::EnumerateSessions() | % { $_.Item1 } | Select-Object -Unique
+$exp = [GDL.Broadcast.AllSessions]::ExplorerSessions()
+$sessions = ($wts + $exp) | Select-Object -Unique | Sort-Object
 
-# Unifica por Id
-$all = @{} 
-foreach($s in $wtsSessions + $expSessions){ $all[[uint32]$s.Id] = $s }
-$sessions = $all.Values | Sort-Object Id
-
-$okList = @(); $failList = @()
-foreach($sess in $sessions){
-  $id = [uint32]$sess.Id
-  $ok = [GDL.Broadcast.AllSessions]::LaunchInSession($id, $cmd)
-  if($ok){ $okList += $id } else { $failList += $sess }
+$ok=@(); $fail=@()
+foreach($sid in $sessions){
+  if([GDL.Broadcast.AllSessions]::LaunchInSession([uint32]$sid, $cmd)){ $ok+=$sid } else { $fail+=$sid }
 }
 
-Write-Host ("Sessões encontradas: {0} | Sucesso: {1} | Falha: {2}" -f $sessions.Count, $okList.Count, $failList.Count)
-if($failList.Count){
-  Write-Warning ("Falhas: " + ($failList | Select-Object Id,State | ConvertTo-Json -Compress))
-}
+Write-Host ("Sessões: {0} | Sucesso: {1} | Falha: {2}" -f $sessions.Count, $ok.Count, $fail.Count)
+if($fail.Count -gt 0){ Write-Warning ("Falharam: " + ($fail -join ',')) }
 
-# Se nada abriu, grava NOUSER p/ diagnóstico
-if(($okList.Count -eq 0) -and -not (Test-Path $AnswerFile)){
+# Se nada abriu, grava NOUSER para diagnóstico
+if(($ok.Count -eq 0) -and -not (Test-Path $AnswerFile)){
   Set-Content -Path $AnswerFile -Value 'NOUSER' -Encoding UTF8
 }
