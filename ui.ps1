@@ -1,162 +1,175 @@
 #requires -version 5.1
+<#
+Uso:
+  powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\BroadcastPrompt.ps1
+
+Comportamento:
+  - Mostra uma mensagem com botões Sim/Não/Cancelar em TODAS as sessões ativas/conectadas:
+      Sim      = Executar agora   (grava NOW)
+      Não      = Adiar 1 hora     (grava 1H)
+      Cancelar = Adiar 2 horas    (grava 2H)
+  - Grava apenas uma vez em C:\ProgramData\Answer.txt (primeiro que responder vence).
+#>
+
+param(
+  [switch]$ForSession,         # interno
+  [int]$SessionId,             # interno
+  [string]$AnswerFile = 'C:\ProgramData\Answer.txt'
+)
+
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
-# ====================== VARIÁVEIS EDITÁVEIS ======================
-$AnswerFile         = 'C:\ProgramData\Answer.txt'
+# ---------- Textos editáveis ----------
+$title   = 'Agendar Execução'
+$body    = @"
+Atualização obrigatória
 
-$Txt_WindowTitle    = 'Agendar Execução'
-$Txt_HeaderTitle    = 'Atualização obrigatória'
-$Txt_HeaderSubtitle = 'Você pode executar agora ou adiar por até 2 horas.'
-$Txt_ActionLine1    = 'Realizar o update do Windows 10 para o Windows 11'
-$Txt_ActionLine2    = 'Tempo Estimado: 20 a 30 minutos'
+Você pode executar agora ou adiar por até 2 horas.
 
-$Txt_BtnNow         = 'Executar agora'
-$Txt_Btn1H          = 'Adiar 1 hora'
-$Txt_Btn2H          = 'Adiar 2 horas'
-# ================================================================
+Escolha uma opção:
+  - SIM      = Executar agora
+  - NÃO      = Adiar 1 hora
+  - CANCELAR = Adiar 2 horas
+"@.Trim()
+# --------------------------------------
 
-# --- Garante STA (necessário para UI estável) ---
+# --- Interop mínimo com WTS (Win32) ---
+# (precisa desses imports para enviar a msgbox para outras sessões)
+$wtsSrc = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class WTS {
+  public const int WTS_CURRENT_SERVER_HANDLE = 0;
+  public enum WTS_CONNECTSTATE_CLASS { Active=0, Connected=1, ConnectQuery=2, Shadow=3, Disconnected=4, Idle=5, Listen=6, Reset=7, Down=8, Init=9 }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct WTS_SESSION_INFO {
+    public int SessionId;
+    [MarshalAs(UnmanagedType.LPTStr)] public string pWinStationName;
+    public WTS_CONNECTSTATE_CLASS State;
+  }
+
+  [DllImport("wtsapi32.dll", SetLastError=true)]
+  public static extern bool WTSEnumerateSessions(
+    IntPtr hServer, int Reserved, int Version,
+    out IntPtr ppSessionInfo, out int pCount
+  );
+
+  [DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr pMemory);
+
+  [DllImport("wtsapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool WTSSendMessage(
+    IntPtr hServer,
+    int SessionId,
+    string pTitle, int TitleLength,
+    string pMessage, int MessageLength,
+    int Style, int Timeout,
+    out int pResponse, bool bWait
+  );
+}
+"@
+
+Add-Type -TypeDefinition $wtsSrc -ErrorAction Stop | Out-Null
+
+function Get-WTSSessions {
+  $pp = [IntPtr]::Zero
+  $count = 0
+  $ok = [WTS]::WTSEnumerateSessions([IntPtr]::Zero, 0, 1, [ref]$pp, [ref]$count)
+  if (-not $ok -or $pp -eq [IntPtr]::Zero -or $count -le 0) { return @() }
+  try {
+    $size = [Runtime.InteropServices.Marshal]::SizeOf([type][WTS+WTS_SESSION_INFO])
+    $list = New-Object System.Collections.Generic.List[Object]
+    for ($i=0; $i -lt $count; $i++) {
+      $itemPtr = [IntPtr]::Add($pp, $i * $size)
+      $info = [Runtime.InteropServices.Marshal]::PtrToStructure($itemPtr, [type][WTS+WTS_SESSION_INFO])
+      $list.Add($info)
+    }
+    return $list
+  } finally {
+    [WTS]::WTSFreeMemory($pp)
+  }
+}
+
+function Send-Prompt-ToSession {
+  param([int]$Sid)
+
+  # Botões: MB_YESNOCANCEL (0x00000003). Ícone pergunta (0x00000020). Topmost (0x00040000).
+  $MB_YESNOCANCEL = 0x00000003
+  $MB_ICONQUESTION = 0x00000020
+  $MB_TOPMOST = 0x00040000
+  $style = $MB_YESNOCANCEL -bor $MB_ICONQUESTION -bor $MB_TOPMOST
+
+  # Timeout em segundos (opcional). 0 = infinito.
+  $timeoutSec = 0
+
+  $resp = 0
+  $ok = [WTS]::WTSSendMessage([IntPtr]::Zero, $Sid, $title, $title.Length, $body, $body.Length, $style, $timeoutSec, [ref]$resp, $true)
+  if (-not $ok) { return $null }
+
+  # Mapear resposta para NOW/1H/2H
+  switch ($resp) {
+    6 { return 'NOW' }   # IDYES
+    7 { return '1H' }    # IDNO
+    2 { return '2H' }    # IDCANCEL
+    default { return $null }
+  }
+}
+
+function Try-Write-AnswerOnce {
+  param([string]$Value, [string]$Path)
+
+  try {
+    # CreateNew -> falha se já existir (primeiro a escrever vence)
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+      $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+      $fs.Write($bytes, 0, $bytes.Length)
+      $fs.Flush()
+      return $true
+    } finally { $fs.Dispose() }
+  } catch {
+    return $false
+  }
+}
+
+# ============== Modo por sessão (interno) ==============
+if ($ForSession) {
+  # Garante pasta do arquivo
+  try {
+    $dir = Split-Path -LiteralPath $AnswerFile -ErrorAction SilentlyContinue
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  } catch {}
+
+  $ans = Send-Prompt-ToSession -Sid $SessionId
+  if ($ans) { [void](Try-Write-AnswerOnce -Value $ans -Path $AnswerFile) }
+  exit 0
+}
+
+# ============== Modo Broadcast (padrão) ==============
+# 1) Descobre sessões de usuário (ativas ou conectadas), exceto 0
+$sessions = Get-WTSSessions | Where-Object { $_.SessionId -ne 0 -and ( $_.State -eq [WTS+WTS_CONNECTSTATE_CLASS]::Active -or $_.State -eq [WTS+WTS_CONNECTSTATE_CLASS]::Connected ) }
+
+if (-not $sessions -or $sessions.Count -eq 0) {
+  Write-Host "Nenhuma sessão de usuário ativa/conectada encontrada."
+  exit 1
+}
+
+# 2) Lança um powershell destacado por sessão (não bloqueia a console atual)
 $psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { $psExe = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" }
-if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-    $self = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
-    Start-Process -FilePath $psExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',"`"$self`"") -WindowStyle Hidden | Out-Null
-    return
+$self  = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+
+foreach ($s in $sessions) {
+  Start-Process -FilePath $psExe -ArgumentList @(
+    '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden',
+    '-File',"`"$self`"",
+    '-ForSession',
+    '-SessionId',"$($s.SessionId)",
+    '-AnswerFile',"`"$AnswerFile`""
+  ) -WindowStyle Hidden | Out-Null
 }
 
-# --- Dependências WinForms ---
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-# --- Prepara pasta do arquivo ---
-try {
-    $dir = Split-Path -LiteralPath $AnswerFile
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-} catch {}
-
-# --- Função para gravar e fechar com segurança ---
-$script:allowClose = $false
-function Write-Answer([string]$text, [System.Windows.Forms.Form]$form) {
-    try {
-        [System.IO.File]::WriteAllText($AnswerFile, $text, [System.Text.Encoding]::UTF8)
-    } catch {
-        [System.Windows.Forms.MessageBox]::Show("Falha ao gravar $AnswerFile`n$($_.Exception.Message)", "Erro", 'OK', 'Error') | Out-Null
-    }
-    $script:allowClose = $true
-    try { $form.Close() } catch {}
-}
-
-# --- Form principal (sem botão fechar) ---
-$form                  = New-Object System.Windows.Forms.Form
-$form.Text             = $Txt_WindowTitle
-$form.StartPosition    = 'CenterScreen'
-$form.FormBorderStyle  = 'FixedDialog'
-$form.ControlBox       = $false          # remove fechar/min/max
-$form.MinimizeBox      = $false
-$form.MaximizeBox      = $false
-$form.TopMost          = $true
-$form.BackColor        = [System.Drawing.ColorTranslator]::FromHtml('#0f172a')
-$form.ClientSize       = New-Object System.Drawing.Size(600,260)
-
-# Impede Alt+F4 / fechar sem escolher
-$form.Add_FormClosing({
-    param($s,$e)
-    if (-not $script:allowClose) { $e.Cancel = $true }
-})
-
-# Cabeçalho (retangular)
-$header = New-Object System.Windows.Forms.Panel
-$header.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#111827')
-$header.Size      = New-Object System.Drawing.Size(568,60)
-$header.Location  = New-Object System.Drawing.Point(16,16)
-$form.Controls.Add($header)
-
-$lblTitle = New-Object System.Windows.Forms.Label
-$lblTitle.Text      = $Txt_HeaderTitle
-$lblTitle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#e5e7eb')
-$lblTitle.Font      = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Bold)
-$lblTitle.AutoSize  = $true
-$lblTitle.Location  = New-Object System.Drawing.Point(12,10)
-$header.Controls.Add($lblTitle)
-
-$lblSub = New-Object System.Windows.Forms.Label
-$lblSub.Text      = $Txt_HeaderSubtitle
-$lblSub.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#9ca3af')
-$lblSub.Font      = New-Object System.Drawing.Font('Segoe UI', 9)
-$lblSub.AutoSize  = $true
-$lblSub.Location  = New-Object System.Drawing.Point(12,33)
-$header.Controls.Add($lblSub)
-
-# Corpo
-$body = New-Object System.Windows.Forms.Panel
-$body.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#0b1220')
-$body.Size      = New-Object System.Drawing.Size(568,100)
-$body.Location  = New-Object System.Drawing.Point(16,86)
-$form.Controls.Add($body)
-
-$lblL1 = New-Object System.Windows.Forms.Label
-$lblL1.Text      = $Txt_ActionLine1
-$lblL1.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#cbd5e1')
-$lblL1.Font      = New-Object System.Drawing.Font('Segoe UI', 10)
-$lblL1.AutoSize  = $true
-$lblL1.Location  = New-Object System.Drawing.Point(12,14)
-$body.Controls.Add($lblL1)
-
-$lblL2 = New-Object System.Windows.Forms.Label
-$lblL2.Text      = $Txt_ActionLine2
-$lblL2.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#cbd5e1')
-$lblL2.Font      = New-Object System.Drawing.Font('Segoe UI', 10)
-$lblL2.AutoSize  = $true
-$lblL2.Location  = New-Object System.Drawing.Point(12,40)
-$body.Controls.Add($lblL2)
-
-# Botões (retangulares, tamanhos fixos)
-$btnNow             = New-Object System.Windows.Forms.Button
-$btnNow.Text        = $Txt_BtnNow
-$btnNow.Size        = New-Object System.Drawing.Size(180,40)
-$btnNow.Location    = New-Object System.Drawing.Point(16+568- (180*3 + 8*2), 200)
-$btnNow.BackColor   = [System.Drawing.ColorTranslator]::FromHtml('#0078d4')
-$btnNow.ForeColor   = [System.Drawing.Color]::White
-$btnNow.FlatStyle   = 'Standard'
-
-$btn1h              = New-Object System.Windows.Forms.Button
-$btn1h.Text         = $Txt_Btn1H
-$btn1h.Size         = New-Object System.Drawing.Size(180,40)
-$btn1h.Location     = New-Object System.Drawing.Point($btnNow.Location.X + 180 + 8, 200)
-$btn1h.BackColor    = [System.Drawing.ColorTranslator]::FromHtml('#1f2937')
-$btn1h.ForeColor    = [System.Drawing.ColorTranslator]::FromHtml('#e5e7eb')
-$btn1h.FlatStyle    = 'Standard'
-
-$btn2h              = New-Object System.Windows.Forms.Button
-$btn2h.Text         = $Txt_Btn2H
-$btn2h.Size         = New-Object System.Drawing.Size(180,40)
-$btn2h.Location     = New-Object System.Drawing.Point($btn1h.Location.X + 180 + 8, 200)
-$btn2h.BackColor    = [System.Drawing.ColorTranslator]::FromHtml('#1f2937')
-$btn2h.ForeColor    = [System.Drawing.ColorTranslator]::FromHtml('#e5e7eb')
-$btn2h.FlatStyle    = 'Standard'
-
-$form.Controls.AddRange(@($btnNow,$btn1h,$btn2h))
-
-# Eventos
-$btnNow.Add_Click({ Write-Answer 'NOW' $form })
-$btn1h.Add_Click({ Write-Answer '1H'  $form })
-$btn2h.Add_Click({ Write-Answer '2H'  $form })
-
-# Permite arrastar a janela clicando no cabeçalho
-$header.Add_MouseDown({
-    if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        $form.Capture = $false
-        $msg = 0xA1; $wparam = 2; $lparam = 0
-        [void][System.Windows.Forms.SendKeys]::Flush()
-        [void][System.Windows.Forms.NativeWindow]::FromHandle($form.Handle)
-        # Move via WinAPI simples:
-        Add-Type -Name N -Namespace Win -MemberDefinition '[DllImport("user32.dll")] public static extern bool ReleaseCapture(); [DllImport("user32.dll")] public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);' -UsingNamespace System.Runtime.InteropServices -ErrorAction SilentlyContinue | Out-Null
-        [Win.N]::ReleaseCapture() | Out-Null
-        [Win.N]::SendMessage($form.Handle, $msg, $wparam, $lparam) | Out-Null
-    }
-})
-
-# Exibe
-[void][System.Windows.Forms.Application]::Run($form)
+Write-Host ("Disparado para {0} sessão(ões): {1}" -f $sessions.Count, ($sessions.SessionId -join ', '))
+exit 0
