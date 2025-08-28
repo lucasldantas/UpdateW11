@@ -1,262 +1,138 @@
 #requires -version 5.1
-<#
-  Show-ChoiceToAllSessions.ps1
-  - Exibe um formulário com 3 opções para cada sessão de usuário ATIVA
-  - Grava a escolha em C:\ProgramData\answer.txt
-  - Compatível com execução via PS Remoting (sem UI local)
-#>
+param([switch]$RePrompt)
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
-$ErrorActionPreference = 'Stop'
 
-$ProgData      = 'C:\ProgramData'
-$AnswerPath    = Join-Path $ProgData 'answer.txt'
-$UiScriptPath  = Join-Path $ProgData 'ShowChoice-UI.ps1'
-$HelperPath    = Join-Path $ProgData 'ShowChoice-Helper.ps1'
-$TaskName      = 'GDL-ShowChoiceAllSessions-TEMP'
+# ==================== TEXTOS / RÓTULOS ====================
+$Txt_WindowTitle          = 'Agendar Execução'
+$Txt_HeaderTitle          = 'Atualização Obrigatória'
+$Txt_HeaderSubtitle       = 'Você pode executar agora ou adiar por até 2 horas.'
+$Txt_ActionLabel          = 'Ação:'
+$Txt_ActionLine1          = 'Realizar o update do Windows 10 para o Windows 11'
+$Txt_ActionLine2          = 'Tempo Estimado: 20 a 30 minutos'
 
-if (-not (Test-Path $ProgData)) { New-Item -Path $ProgData -ItemType Directory -Force | Out-Null }
+$Txt_BtnNow               = 'Executar agora'
+$Txt_BtnDelay1            = 'Adiar 1 hora'
+$Txt_BtnDelay2            = 'Adiar 2 horas'
+# ==========================================================
 
-# --- 1) Script da UI (executa no contexto de cada sessão de usuário)
-$uiScript = @'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$AnswerFile = "C:\ProgramData\answer.txt"
+# ---------- Garantir STA ----------
+$PsExeFull = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+try {
+  if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA' -and $PSCommandPath) {
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File', $PSCommandPath)
+    if ($RePrompt) { $args += '-RePrompt' }
+    Start-Process -FilePath $PsExeFull -ArgumentList $args | Out-Null
+    return
+  }
+} catch {}
 
-# Form
-$form              = New-Object System.Windows.Forms.Form
-$form.StartPosition= 'CenterScreen'
-$form.Text         = 'Ação requerida'
-$form.Width        = 420
-$form.Height       = 240
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox  = $false
-$form.TopMost      = $true
-
-# Label
-$lbl               = New-Object System.Windows.Forms.Label
-$lbl.Text          = "Escolha uma opção:"
-$lbl.AutoSize      = $true
-$lbl.Font          = New-Object System.Drawing.Font('Segoe UI', 12,[System.Drawing.FontStyle]::Bold)
-$lbl.Location      = New-Object System.Drawing.Point(20,20)
-$form.Controls.Add($lbl)
-
-# Botões
-$btnNow = New-Object System.Windows.Forms.Button
-$btnNow.Text = 'Executar agora'
-$btnNow.Width = 350
-$btnNow.Height= 36
-$btnNow.Location = New-Object System.Drawing.Point(30,70)
-
-$btnD1  = New-Object System.Windows.Forms.Button
-$btnD1.Text = 'Adiar 1 hora'
-$btnD1.Width = 350
-$btnD1.Height= 36
-$btnD1.Location = New-Object System.Drawing.Point(30,115)
-
-$btnD2  = New-Object System.Windows.Forms.Button
-$btnD2.Text = 'Adiar 2 horas'
-$btnD2.Width = 350
-$btnD2.Height= 36
-$btnD2.Location = New-Object System.Drawing.Point(30,160)
-
-$form.Controls.AddRange(@($btnNow,$btnD1,$btnD2))
-
-function Save-Answer($text){
-  try {
-    $line = $text
-    [IO.File]::AppendAllText($AnswerFile, $line + [Environment]::NewLine, [Text.Encoding]::UTF8)
-  } catch {}
+# ---------- Apenas salvar a resposta ----------
+$AnswerPath = 'C:\ProgramData\answer.txt'
+if (-not (Test-Path 'C:\ProgramData')) { New-Item -Path 'C:\ProgramData' -ItemType Directory -Force | Out-Null }
+function Save-Answer([string]$text){
+  try { [IO.File]::AppendAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
 }
 
-$btnNow.Add_Click({ Save-Answer 'Executar agora'; $form.Close() })
-$btnD1.Add_Click ({ Save-Answer 'Adiar 1 hora';   $form.Close() })
-$btnD2.Add_Click ({ Save-Answer 'Adiar 2 horas';  $form.Close() })
+# ==================== UI (WPF) ====================
+Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
 
-[void]$form.ShowDialog()
-'@
-Set-Content -LiteralPath $UiScriptPath -Value $uiScript -Encoding UTF8 -Force
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Txt_WindowTitle"
+        Width="520" MinHeight="300" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize" Background="#0f172a"
+        WindowStyle="None" ShowInTaskbar="True">
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
 
-# --- 2) Helper que injeta o processo nas sessões ativas (requer SYSTEM)
-$helperScript = @'
-using namespace System
-using namespace System.Runtime.InteropServices
+    <!-- Cabeçalho -->
+    <Border Grid.Row="0" CornerRadius="12" Background="#111827" Padding="16">
+      <StackPanel>
+        <TextBlock Name="TitleText" Text="$Txt_HeaderTitle" Foreground="#e5e7eb"
+                   FontFamily="Segoe UI" FontWeight="Bold" FontSize="20"/>
+        <TextBlock Name="SubText" Text="$Txt_HeaderSubtitle"
+                   Foreground="#9ca3af" FontFamily="Segoe UI" FontSize="12" Margin="0,6,0,0"/>
+      </StackPanel>
+    </Border>
 
-Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
-using System;
-using System.Runtime.InteropServices;
+    <!-- Corpo -->
+    <Border Grid.Row="2" CornerRadius="12" Background="#0b1220" Padding="16" Margin="0,16,0,16">
+      <StackPanel>
+        <TextBlock Text="$Txt_ActionLabel" Foreground="#cbd5e1" FontFamily="Segoe UI" FontSize="14" Margin="0,0,0,6"/>
+        <TextBlock Text="$Txt_ActionLine1"
+                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
+                   Background="#0b1220" TextWrapping="Wrap" Margin="0,0,0,4"/>
+        <TextBlock Text="$Txt_ActionLine2"
+                   Foreground="#94a3b8" FontFamily="Consolas" FontSize="14"
+                   Background="#0b1220" TextWrapping="Wrap"/>
+      </StackPanel>
+    </Border>
 
-public class NativeMethods {
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-  public struct STARTUPINFO {
-    public int cb;
-    public string lpReserved;
-    public string lpDesktop;
-    public string lpTitle;
-    public int dwX;
-    public int dwY;
-    public int dwXSize;
-    public int dwYSize;
-    public int dwXCountChars;
-    public int dwYCountChars;
-    public int dwFillAttribute;
-    public int dwFlags;
-    public short wShowWindow;
-    public short cbReserved2;
-    public IntPtr lpReserved2;
-    public IntPtr hStdInput;
-    public IntPtr hStdOutput;
-    public IntPtr hStdError;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct PROCESS_INFORMATION {
-    public IntPtr hProcess;
-    public IntPtr hThread;
-    public int dwProcessId;
-    public int dwThreadId;
-  }
-
-  [DllImport("wtsapi32.dll", SetLastError=true)]
-  public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
-
-  [DllImport("advapi32.dll", SetLastError=true)]
-  public static extern bool DuplicateTokenEx(
-      IntPtr hExistingToken,
-      uint dwDesiredAccess,
-      IntPtr lpTokenAttributes,
-      int ImpersonationLevel,
-      int TokenType,
-      out IntPtr phNewToken);
-
-  [DllImport("userenv.dll", SetLastError=true)]
-  public static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
-
-  [DllImport("userenv.dll", SetLastError=true)]
-  public static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
-
-  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  public static extern bool CreateProcessAsUser(
-      IntPtr hToken,
-      string lpApplicationName,
-      string lpCommandLine,
-      IntPtr lpProcessAttributes,
-      IntPtr lpThreadAttributes,
-      bool bInheritHandles,
-      uint dwCreationFlags,
-      IntPtr lpEnvironment,
-      string lpCurrentDirectory,
-      ref STARTUPINFO lpStartupInfo,
-      out PROCESS_INFORMATION lpProcessInformation);
-
-  [DllImport("kernel32.dll", SetLastError=true)]
-  public static extern bool CloseHandle(IntPtr hObject);
-}
+    <!-- Botões -->
+    <DockPanel Grid.Row="3">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button Name="BtnNow" Content="$Txt_BtnNow" Margin="8,0,0,0" Padding="16,8"
+                Background="#22c55e" Foreground="White" FontFamily="Segoe UI" FontWeight="SemiBold"
+                BorderBrush="#16a34a" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnDelay1" Content="$Txt_BtnDelay1" Margin="8,0,0,0" Padding="16,8"
+                Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
+                BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
+        <Button Name="BtnDelay2" Content="$Txt_BtnDelay2" Margin="8,0,0,0" Padding="16,8"
+                Background="#1f2937" Foreground="#e5e7eb" FontFamily="Segoe UI"
+                BorderBrush="#374151" BorderThickness="1" Cursor="Hand"/>
+      </StackPanel>
+    </DockPanel>
+  </Grid>
+</Window>
 "@
 
-# Inicia um processo (cmdline) dentro da sessão do usuário
-function Start-ProcessInSession {
-  param(
-    [uint32]$SessionId,
-    [string]$CommandLine
-  )
+# Carrega a janela
+$reader  = New-Object System.Xml.XmlNodeReader $xaml
+$window  = [Windows.Markup.XamlReader]::Load($reader)
+if (-not $window) { throw "Falha ao carregar a UI a partir do XAML." }
 
-  $TOKEN_ASSIGN_PRIMARY = 0x0001
-  $TOKEN_DUPLICATE      = 0x0002
-  $TOKEN_QUERY          = 0x0008
-  $TOKEN_ADJUST_DEFAULT = 0x0080
-  $TOKEN_ADJUST_SESSION = 0x0100
-  $MAXIMUM_ALLOWED      = 0x02000000
-  $DesiredAccess = $TOKEN_ASSIGN_PRIMARY -bor $TOKEN_DUPLICATE -bor $TOKEN_QUERY -bor $TOKEN_ADJUST_DEFAULT -bor $TOKEN_ADJUST_SESSION -bor $MAXIMUM_ALLOWED
+# Garantir foco rápido
+$window.Topmost = $true
+$window.Add_Loaded({
+  try {
+    $this.Activate()      | Out-Null
+    $this.BringIntoView() | Out-Null
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromMilliseconds(150)
+    $t.Add_Tick({ param($s,$e) try { $this.Activate() | Out-Null } catch {} ; $s.Stop() })
+    $t.Start()
+  } catch {}
+})
 
-  $SECURITY_IMPERSONATION = 2
-  $TOKEN_TYPE_PRIMARY     = 1
-  $CREATE_UNICODE_ENVIRONMENT = 0x00000400
-  $CREATE_NEW_CONSOLE          = 0x00000010
-
-  $hUserToken = [IntPtr]::Zero
-  if (-not ([Win32.NativeMethods]::WTSQueryUserToken($SessionId, [ref]$hUserToken))) {
-    return $false
+# Arrastar (sem barra de título)
+$window.Add_MouseLeftButtonDown({
+  if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+    try { $window.DragMove() } catch {}
   }
+})
 
-  $hPrimary = [IntPtr]::Zero
-  if (-not ([Win32.NativeMethods]::DuplicateTokenEx($hUserToken, $DesiredAccess, [IntPtr]::Zero, $SECURITY_IMPERSONATION, $TOKEN_TYPE_PRIMARY, [ref]$hPrimary))) {
-    [Win32.NativeMethods]::CloseHandle($hUserToken) | Out-Null
-    return $false
-  }
+# Controles
+$BtnNow    = $window.FindName('BtnNow')
+$BtnDelay1 = $window.FindName('BtnDelay1')
+$BtnDelay2 = $window.FindName('BtnDelay2')
 
-  $envPtr = [IntPtr]::Zero
-  [Win32.NativeMethods]::CreateEnvironmentBlock([ref]$envPtr, $hPrimary, $true) | Out-Null
+# (Opcional) bloquear fechar no X: o usuário deve escolher uma opção
+$script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[System.ComponentModel.CancelEventArgs]$e) $e.Cancel = $true }
+$window.add_Closing($script:closingHandler)
+function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-  $si = New-Object Win32.NativeMethods+STARTUPINFO
-  $si.cb = [Runtime.InteropServices.Marshal]::SizeOf([type]Win32.NativeMethods+STARTUPINFO)
-  $si.lpDesktop = "winsta0\default"
-  $pi = New-Object Win32.NativeMethods+PROCESS_INFORMATION
+# -------- Eventos: apenas salvar e fechar --------
+$BtnNow.Add_Click   ({ Save-Answer 'Executar agora'; Allow-Close $window; $window.Close() })
+$BtnDelay1.Add_Click({ Save-Answer 'Adiar 1 hora';   Allow-Close $window; $window.Close() })
+$BtnDelay2.Add_Click({ Save-Answer 'Adiar 2 horas';  Allow-Close $window; $window.Close() })
 
-  $ok = [Win32.NativeMethods]::CreateProcessAsUser(
-    $hPrimary,
-    $null,
-    $CommandLine,
-    [IntPtr]::Zero,
-    [IntPtr]::Zero,
-    $false,
-    ($CREATE_UNICODE_ENVIRONMENT -bor $CREATE_NEW_CONSOLE),
-    $envPtr,
-    "C:\Windows\System32",
-    [ref]$si,
-    [ref]$pi
-  )
-
-  if ($envPtr -ne [IntPtr]::Zero) { [Win32.NativeMethods]::DestroyEnvironmentBlock($envPtr) | Out-Null }
-  if ($pi.hThread -ne [IntPtr]::Zero) { [Win32.NativeMethods]::CloseHandle($pi.hThread) | Out-Null }
-  if ($pi.hProcess -ne [IntPtr]::Zero){ [Win32.NativeMethods]::CloseHandle($pi.hProcess) | Out-Null }
-  if ($hPrimary -ne [IntPtr]::Zero)    { [Win32.NativeMethods]::CloseHandle($hPrimary) | Out-Null }
-  if ($hUserToken -ne [IntPtr]::Zero)  { [Win32.NativeMethods]::CloseHandle($hUserToken) | Out-Null }
-
-  return $ok
-}
-
-# Descobre sessões ativas via "quser" (funciona em PT/EN)
-$activeSessionIds = @()
-$quser = & quser 2>$null
-if ($quser) {
-  foreach($line in $quser) {
-    # Ex.: "> user            rdp-tcp#1         2  Ativo   ... "  ou "... Active ..."
-    if ($line -match '\s(\d+)\s+(Ativo|Active)\b') {
-      $sid = [uint32]($Matches[1])
-      if ($sid -gt 0) { $activeSessionIds += $sid }
-    }
-  }
-}
-$activeSessionIds = $activeSessionIds | Sort-Object -Unique
-if (-not $activeSessionIds) { return }
-
-$uiPath = "C:\ProgramData\ShowChoice-UI.ps1"
-$cmd    = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$uiPath`""
-
-foreach($sid in $activeSessionIds) {
-  try { Start-ProcessInSession -SessionId $sid -CommandLine $cmd | Out-Null } catch {}
-}
-'@
-Set-Content -LiteralPath $HelperPath -Value $helperScript -Encoding UTF8 -Force
-
-# --- 3) Se já for SYSTEM, executa helper direto; senão cria/agora uma tarefa como SYSTEM
-function Test-IsSystem {
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  return ($id.User.Value -eq 'S-1-5-18')
-}
-
-if (Test-IsSystem) {
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $HelperPath
-} else {
-  # Cria/roda tarefa como SYSTEM para executar o helper (que injeta o form nas sessões)
-  $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-  try { schtasks /Delete /TN $TaskName /F 1>$null 2>$null } catch {}
-  schtasks /Create /TN $TaskName /SC ONCE /ST $startTime /RL HIGHEST /RU SYSTEM /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$HelperPath`"" | Out-Null
-  schtasks /Run /TN $TaskName | Out-Null
-  Start-Sleep -Seconds 3
-  # (opcional) limpar tarefa após alguns minutos
-  Start-Job -ScriptBlock { Start-Sleep 300; schtasks /Delete /TN 'GDL-ShowChoiceAllSessions-TEMP' /F 1>$null 2>$null } | Out-Null
-}
-
-Write-Host "Formulário enviado para as sessões ativas. As respostas serão salvas em $AnswerPath"
+# Mostrar
+$null = $window.ShowDialog()
