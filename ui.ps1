@@ -31,7 +31,7 @@ try {
 $AnswerPath = 'C:\ProgramData\answer.txt'
 if (-not (Test-Path 'C:\ProgramData')) { New-Item -Path 'C:\ProgramData' -ItemType Directory -Force | Out-Null }
 function Save-Answer([string]$text){
-  try { [IO.File]::AppendAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
+  try { [IO.File]::WriteAllText($AnswerPath, $text + [Environment]::NewLine, [Text.Encoding]::UTF8) } catch {}
 }
 
 # ==================== UI (WPF) ====================
