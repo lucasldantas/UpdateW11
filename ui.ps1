@@ -129,10 +129,18 @@ $script:closingHandler = [System.ComponentModel.CancelEventHandler]{ param($s,[S
 $window.add_Closing($script:closingHandler)
 function Allow-Close([System.Windows.Window]$win) { if ($win -and $script:closingHandler) { $win.remove_Closing($script:closingHandler) } }
 
-# -------- Eventos: apenas salvar e fechar --------
-$BtnNow.Add_Click   ({ Save-Answer 'Executar agora'; Allow-Close $window; $window.Close() })
-$BtnDelay1.Add_Click({ Save-Answer 'Adiar 1 hora';   Allow-Close $window; $window.Close() })
-$BtnDelay2.Add_Click({ Save-Answer 'Adiar 2 horas';  Allow-Close $window; $window.Close() })
+# -------- Eventos usando Register-ObjectEvent (robusto para iex) --------
+$e1 = Register-ObjectEvent -InputObject $BtnNow    -EventName Click -Action { Save-Answer 'Executar agora'; Allow-Close $window; $window.Close() }
+$e2 = Register-ObjectEvent -InputObject $BtnDelay1 -EventName Click -Action { Save-Answer 'Adiar 1 hora';   Allow-Close $window; $window.Close() }
+$e3 = Register-ObjectEvent -InputObject $BtnDelay2 -EventName Click -Action { Save-Answer 'Adiar 2 horas';  Allow-Close $window; $window.Close() }
 
-# Mostrar
-$null = $window.ShowDialog()
+try {
+  $null = $window.ShowDialog()
+} finally {
+  # limpa subscrição de eventos
+  foreach($ev in @($e1,$e2,$e3)) {
+    try { if ($ev) { Unregister-Event -SourceIdentifier $ev.Name -ErrorAction SilentlyContinue } } catch {}
+  }
+  Remove-Job -State Completed -ErrorAction SilentlyContinue | Out-Null
+}
+
